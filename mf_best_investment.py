@@ -64,26 +64,36 @@ class MutualFundAnalyzer:
             return None
 
     def collect_schemes_by_categories(
-        self, categories: List[str], prefer_direct_growth: bool = True, max_per_cat: int = 30
+        self,
+        categories: List[str],
+        plan_type: str = "both",  # "direct", "regular", "both"
+        max_per_cat: int = 30,
     ) -> Dict[int, Dict]:
         """Collect unique schemes matching categories. Returns {code: meta_preview}."""
         schemes = {}
         for cat in categories:
             keywords = CATEGORY_KEYWORDS.get(cat.lower(), [cat])
             for kw in keywords:
-                query = kw
-                if prefer_direct_growth:
-                    query = f"{kw} Direct Growth"
-                results = self.search_schemes(query)
-                for s in results[:max_per_cat]:
-                    code = s["schemeCode"]
-                    if code not in schemes:
-                        schemes[code] = {
-                            "schemeCode": code,
-                            "schemeName": s["schemeName"],
-                            "category_query": cat,
-                        }
-                time.sleep(self.delay)
+                queries = []
+                if plan_type in ("direct", "both"):
+                    queries.append(f"{kw} Direct Growth")
+                if plan_type in ("regular", "both"):
+                    queries.append(f"{kw} Regular Growth")
+                    queries.append(f"{kw} Growth")  # fallback for regular
+                if not queries:
+                    queries.append(kw)
+
+                for query in queries:
+                    results = self.search_schemes(query)
+                    for s in results[:max_per_cat]:
+                        code = s["schemeCode"]
+                        if code not in schemes:
+                            schemes[code] = {
+                                "schemeCode": code,
+                                "schemeName": s["schemeName"],
+                                "category_query": cat,
+                            }
+                    time.sleep(self.delay)
         return schemes
 
     def parse_nav_series(self, nav_data: List[Dict]) -> pd.DataFrame:
@@ -95,6 +105,15 @@ class MutualFundAnalyzer:
         df["date"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
         df = df.dropna(subset=["date", "nav"]).sort_values("date").reset_index(drop=True)
         return df
+
+    def get_nearest_nav_date(self, df: pd.DataFrame, target_date: datetime) -> Optional[datetime]:
+        """Get the actual date of the nearest prior NAV."""
+        if df.empty:
+            return None
+        valid = df[df["date"] <= target_date]
+        if valid.empty:
+            return None
+        return valid.iloc[-1]["date"]
 
     def get_nearest_nav(self, df: pd.DataFrame, target_date: datetime) -> Optional[float]:
         """Get NAV on or nearest before target_date."""
@@ -153,15 +172,19 @@ class MutualFundAnalyzer:
         end: datetime,
         monthly_amount: float = 10000,
         sip_day: int = 1,
+        return_transactions: bool = False,
     ) -> Optional[Dict]:
-        """Simulate SIP and compute absolute return + approximate XIRR."""
+        """Simulate SIP and compute absolute return + approximate XIRR.
+        Optionally return detailed transaction history.
+        """
         sip_dates = self.generate_sip_dates(start, end, sip_day)
         if not sip_dates:
             return None
 
         total_invested = 0.0
         total_units = 0.0
-        cashflows = []  # for XIRR: (date, -amount) and final +value
+        cashflows = []
+        transactions = []
 
         for sip_date in sip_dates:
             nav = self.get_nearest_nav(df, sip_date)
@@ -171,6 +194,16 @@ class MutualFundAnalyzer:
             total_units += units
             total_invested += monthly_amount
             cashflows.append((sip_date, -monthly_amount))
+            if return_transactions:
+                transactions.append({
+                    "date": sip_date.strftime("%Y-%m-%d"),
+                    "type": "SIP Purchase",
+                    "amount": monthly_amount,
+                    "nav": round(nav, 4),
+                    "units": round(units, 6),
+                    "cumulative_units": round(total_units, 6),
+                    "cumulative_invested": total_invested,
+                })
 
         nav_end = self.get_nearest_nav(df, end)
         if nav_end is None or total_units == 0:
@@ -179,13 +212,21 @@ class MutualFundAnalyzer:
         final_value = total_units * nav_end
         abs_return = (final_value / total_invested - 1) * 100 if total_invested > 0 else 0
 
-        # Simple XIRR approximation using Newton-Raphson
         cashflows.append((end, final_value))
         xirr = self.compute_xirr(cashflows)
 
-        days = (end - start).days
-        years = days / 365.25
-        return {
+        if return_transactions:
+            transactions.append({
+                "date": end.strftime("%Y-%m-%d"),
+                "type": "Redemption (hypothetical)",
+                "amount": round(final_value, 2),
+                "nav": round(nav_end, 4),
+                "units": round(total_units, 6),
+                "cumulative_units": 0,
+                "cumulative_invested": total_invested,
+            })
+
+        result = {
             "invested": total_invested,
             "final_value": final_value,
             "abs_return_pct": abs_return,
@@ -194,6 +235,63 @@ class MutualFundAnalyzer:
             "num_sips": len([cf for cf in cashflows if cf[1] < 0]),
             "nav_end": nav_end,
         }
+        if return_transactions:
+            result["transactions"] = transactions
+        return result
+
+    def generate_equity_curve(
+        self,
+        df_nav: pd.DataFrame,
+        start: datetime,
+        end: datetime,
+        mode: str,
+        amount: float,
+        sip_day: int = 1,
+        weight: float = 1.0,
+    ) -> pd.DataFrame:
+        """Generate daily equity curve (portfolio value over time) for one scheme.
+        Returns DataFrame with columns: date, value
+        """
+        if df_nav.empty:
+            return pd.DataFrame()
+
+        df = df_nav[(df_nav["date"] >= start) & (df_nav["date"] <= end)].copy()
+        if df.empty:
+            return pd.DataFrame()
+
+        if mode == "lumpsum":
+            nav_start = self.get_nearest_nav(df_nav, start)
+            if not nav_start or nav_start == 0:
+                return pd.DataFrame()
+            units = (amount * weight) / nav_start
+            df["value"] = units * df["nav"]
+            return df[["date", "value"]].reset_index(drop=True)
+
+        # SIP mode
+        sip_dates = self.generate_sip_dates(start, end, sip_day)
+        if not sip_dates:
+            return pd.DataFrame()
+
+        # Build cumulative units over time
+        df = df.sort_values("date").reset_index(drop=True)
+        cumulative_units = 0.0
+        values = []
+        dates = []
+        sip_idx = 0
+
+        for _, row in df.iterrows():
+            current_date = row["date"]
+            # Apply any SIPs that fall on or before this date and haven't been applied
+            while sip_idx < len(sip_dates) and sip_dates[sip_idx] <= current_date:
+                sip_nav = self.get_nearest_nav(df_nav, sip_dates[sip_idx])
+                if sip_nav and sip_nav > 0:
+                    units = (amount * weight) / sip_nav
+                    cumulative_units += units
+                sip_idx += 1
+            values.append(cumulative_units * row["nav"])
+            dates.append(current_date)
+
+        return pd.DataFrame({"date": dates, "value": values})
 
     def compute_xirr(self, cashflows: List[Tuple[datetime, float]], guess: float = 0.1) -> Optional[float]:
         """Newton-Raphson XIRR. Cashflows: list of (date, amount) with negatives for investments."""
@@ -235,16 +333,17 @@ class MutualFundAnalyzer:
         self,
         start_date: str,
         end_date: str,
-        mode: str = "lumpsum",  # "lumpsum" or "sip"
-        amount: float = 100000,  # lumpsum or monthly SIP
+        mode: str = "lumpsum",
+        amount: float = 100000,
         categories: Optional[List[str]] = None,
         sip_day: int = 1,
-        prefer_direct_growth: bool = True,
+        plan_type: str = "both",  # "direct", "regular", "both"
         max_schemes: int = 50,
+        collect_transactions: bool = False,
     ) -> pd.DataFrame:
         """
         Main analysis: find best schemes under filters.
-        Returns ranked DataFrame.
+        Returns ranked DataFrame. Optionally includes transaction history for SIP.
         """
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
@@ -254,11 +353,9 @@ class MutualFundAnalyzer:
         if categories is None:
             categories = ["large_cap", "mid_cap", "small_cap"]
 
-        print(f"Collecting schemes for categories: {categories} ...")
         scheme_map = self.collect_schemes_by_categories(
-            categories, prefer_direct_growth, max_per_cat=max_schemes // max(1, len(categories))
+            categories, plan_type, max_per_cat=max_schemes // max(1, len(categories))
         )
-        print(f"Found {len(scheme_map)} candidate schemes. Fetching NAV data...")
 
         results = []
         for code, info in list(scheme_map.items())[:max_schemes]:
@@ -270,17 +367,25 @@ class MutualFundAnalyzer:
             if df_nav.empty or len(df_nav) < 2:
                 continue
 
-            # Basic filter: prefer Growth, Direct if requested
             name = meta.get("scheme_name", info["schemeName"])
-            if prefer_direct_growth and "Direct" not in name:
-                continue
+            # Growth filter
             if "Growth" not in name and "growth" not in name.lower():
+                continue
+
+            # Plan type filter
+            is_direct = "Direct" in name
+            if plan_type == "direct" and not is_direct:
+                continue
+            if plan_type == "regular" and is_direct:
                 continue
 
             if mode == "lumpsum":
                 calc = self.calculate_lumpsum_return(df_nav, start, end, amount)
             else:
-                calc = self.calculate_sip_return(df_nav, start, end, amount, sip_day)
+                calc = self.calculate_sip_return(
+                    df_nav, start, end, amount, sip_day,
+                    return_transactions=collect_transactions,
+                )
 
             if calc is None:
                 continue
@@ -290,16 +395,16 @@ class MutualFundAnalyzer:
                 "scheme_name": name,
                 "fund_house": meta.get("fund_house", ""),
                 "category": meta.get("scheme_category", info.get("category_query", "")),
+                "category_key": info.get("category_query", ""),
+                "plan": "Direct" if is_direct else "Regular",
                 "mode": mode,
                 **calc,
             })
 
         if not results:
-            print("No valid results found. Try broader categories or different dates.")
             return pd.DataFrame()
 
         df = pd.DataFrame(results)
-        # Rank by absolute return (or XIRR for SIP)
         sort_col = "xirr_pct" if mode == "sip" and "xirr_pct" in df.columns else "abs_return_pct"
         df = df.sort_values(sort_col, ascending=False, na_position="last").reset_index(drop=True)
         df["rank"] = df.index + 1
@@ -311,38 +416,114 @@ class MutualFundAnalyzer:
         max_funds: int = 5,
         max_exposure_per_fund: float = 0.3,
         min_exposure_per_fund: float = 0.05,
-        category_limits: Optional[Dict[str, Tuple[float, float]]] = None,
+        constraint_mode: str = "count",  # "count" or "percentage"
+        category_count_limits: Optional[Dict[str, Tuple[int, int]]] = None,
+        category_pct_limits: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> pd.DataFrame:
         """
-        Simple portfolio: take top funds, equal weight or constrained.
-        category_limits: {"Large Cap": (0.2, 0.5), ...} min,max fraction.
+        Build portfolio.
+        constraint_mode:
+          - "count": min/max number of funds per category
+          - "percentage": min/max % exposure per category (with rebalancing)
         """
         if ranked_df.empty:
             return ranked_df
 
-        top = ranked_df.head(max_funds).copy()
-        n = len(top)
-        if n == 0:
-            return top
+        df = ranked_df.copy()
+        if "category_key" not in df.columns:
+            df["category_key"] = df.get("category", "")
 
-        # Start with equal weight, clip to max, redistribute if needed
+        # Select funds
+        selected = []
+        if constraint_mode == "count" and category_count_limits:
+            cat_counts = {k: 0 for k in category_count_limits}
+            for _, row in df.iterrows():
+                if len(selected) >= max_funds:
+                    break
+                cat = row.get("category_key", "")
+                if cat in category_count_limits:
+                    _, max_c = category_count_limits[cat]
+                    if cat_counts.get(cat, 0) >= max_c:
+                        continue
+                selected.append(row)
+                if cat in cat_counts:
+                    cat_counts[cat] += 1
+            # Fill minimums
+            for cat, (min_c, _) in category_count_limits.items():
+                while cat_counts.get(cat, 0) < min_c and len(selected) < max_funds:
+                    already = {r["scheme_code"] for r in selected}
+                    candidates = df[(df["category_key"] == cat) & (~df["scheme_code"].isin(already))]
+                    if candidates.empty:
+                        break
+                    row = candidates.iloc[0]
+                    selected.append(row)
+                    cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        else:
+            # Default / percentage mode: just take top funds
+            selected = [row for _, row in df.head(max_funds).iterrows()]
+
+        if not selected:
+            return pd.DataFrame()
+
+        top = pd.DataFrame(selected).reset_index(drop=True)
+        n = len(top)
+
+        # Initial equal weights
         weights = [1.0 / n] * n
-        weights = [min(w, max_exposure_per_fund) for w in weights]
+
+        # Apply per-fund max/min
+        weights = [min(max(w, min_exposure_per_fund), max_exposure_per_fund) for w in weights]
         total = sum(weights)
         if total > 0:
             weights = [w / total for w in weights]
-        # Enforce min if possible
-        for i in range(n):
-            if weights[i] < min_exposure_per_fund and total > 0:
-                weights[i] = min_exposure_per_fund
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
+
+        # Percentage rebalancing mode
+        if constraint_mode == "percentage" and category_pct_limits:
+            # Simple iterative rebalancing toward category targets
+            cat_to_indices = {}
+            for i, row in top.iterrows():
+                cat = row.get("category_key", "")
+                cat_to_indices.setdefault(cat, []).append(i)
+
+            for _ in range(10):  # a few rebalancing passes
+                cat_sums = {}
+                for cat, idxs in cat_to_indices.items():
+                    cat_sums[cat] = sum(weights[i] for i in idxs)
+
+                changed = False
+                for cat, (min_p, max_p) in category_pct_limits.items():
+                    current = cat_sums.get(cat, 0.0)
+                    idxs = cat_to_indices.get(cat, [])
+                    if not idxs:
+                        continue
+                    if current > max_p + 1e-6:
+                        scale = max_p / current
+                        for i in idxs:
+                            weights[i] *= scale
+                        changed = True
+                    elif current < min_p - 1e-6 and current > 0:
+                        scale = min_p / current
+                        for i in idxs:
+                            weights[i] *= scale
+                        changed = True
+                total = sum(weights)
+                if total > 0:
+                    weights = [w / total for w in weights]
+                if not changed:
+                    break
+
+            # Final clip to per-fund limits and renormalize
+            weights = [min(max(w, min_exposure_per_fund), max_exposure_per_fund) for w in weights]
+            total = sum(weights)
+            if total > 0:
+                weights = [w / total for w in weights]
+        # "percentage_no_rebalance" leaves the equal weights as-is (only per-fund limits applied)
 
         top["weight"] = weights
-        top["allocated_amount"] = top["invested"] * top["weight"] if "invested" in top else None
-        return top[["rank", "scheme_name", "category", "abs_return_pct", "weight"] + 
-                   (["xirr_pct"] if "xirr_pct" in top.columns else [])]
+        cols = ["rank", "scheme_code", "scheme_name", "category_key", "category", "plan", "abs_return_pct", "weight"]
+        if "xirr_pct" in top.columns:
+            cols.insert(-1, "xirr_pct")
+        return top[[c for c in cols if c in top.columns]]
 
 
 def main():
