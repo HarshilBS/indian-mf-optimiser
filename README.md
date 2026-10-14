@@ -2,7 +2,7 @@
 
 Finds the best-performing Indian mutual funds between any two dates for **Lumpsum** or **SIP** investments.
 
-Supports category filters (Large Cap, Mid Cap, Small Cap, Flexi Cap, etc.), prefers Direct Growth plans, and basic portfolio exposure constraints (max/min per fund).
+Supports category filters (Large Cap, Mid Cap, Small Cap, Flexi Cap, etc.) and basic portfolio exposure constraints (max/min per fund).
 
 ## Data Source
 
