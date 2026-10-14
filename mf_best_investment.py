@@ -16,8 +16,9 @@ import math
 
 BASE_URL = "https://api.mfapi.in"
 
-# Category keywords for filtering (SEBI categories)
+# Comprehensive SEBI category keywords (Equity, Debt, Hybrid, etc.)
 CATEGORY_KEYWORDS = {
+    # Equity
     "large_cap": ["Large Cap"],
     "mid_cap": ["Mid Cap"],
     "small_cap": ["Small Cap"],
@@ -25,10 +26,47 @@ CATEGORY_KEYWORDS = {
     "flexi_cap": ["Flexi Cap", "Flexicap"],
     "multi_cap": ["Multi Cap", "Multicap"],
     "focused": ["Focused"],
+    "value_contra": ["Value", "Contra"],
+    "dividend_yield": ["Dividend Yield"],
     "elss": ["ELSS", "Tax Saver"],
+    "sectoral_thematic": ["Sectoral", "Thematic"],
     "index": ["Index"],
-    "debt": ["Debt"],
-    "hybrid": ["Hybrid", "Balanced"],
+    # Debt
+    "overnight": ["Overnight"],
+    "liquid": ["Liquid"],
+    "ultra_short": ["Ultra Short", "Ultra-Short"],
+    "low_duration": ["Low Duration"],
+    "money_market": ["Money Market"],
+    "short_duration": ["Short Duration"],
+    "medium_duration": ["Medium Duration"],
+    "medium_to_long": ["Medium to Long"],
+    "long_duration": ["Long Duration"],
+    "dynamic_bond": ["Dynamic Bond"],
+    "corporate_bond": ["Corporate Bond"],
+    "credit_risk": ["Credit Risk"],
+    "banking_psu": ["Banking and PSU", "Banking & PSU"],
+    "gilt": ["Gilt"],
+    "gilt_10y": ["10 Year Constant Maturity", "Constant Maturity"],
+    "floater": ["Floater"],
+    # Hybrid
+    "conservative_hybrid": ["Conservative Hybrid", "Conservative Allocation"],
+    "balanced_hybrid": ["Balanced Hybrid", "Balanced"],
+    "aggressive_hybrid": ["Aggressive Hybrid", "Aggressive"],
+    "balanced_advantage": ["Balanced Advantage", "Dynamic Asset Allocation"],
+    "multi_asset": ["Multi Asset", "Multi-Asset"],
+    "arbitrage": ["Arbitrage"],
+    "equity_savings": ["Equity Savings"],
+    # Others
+    "solution_oriented": ["Retirement", "Children"],
+    "fof": ["Fund of Funds", "FOF"],
+}
+
+# Grouped for UI display
+CATEGORY_GROUPS = {
+    "Equity": ["large_cap", "mid_cap", "small_cap", "large_mid", "flexi_cap", "multi_cap", "focused", "value_contra", "dividend_yield", "elss", "sectoral_thematic", "index"],
+    "Debt": ["overnight", "liquid", "ultra_short", "low_duration", "money_market", "short_duration", "medium_duration", "medium_to_long", "long_duration", "dynamic_bond", "corporate_bond", "credit_risk", "banking_psu", "gilt", "gilt_10y", "floater"],
+    "Hybrid": ["conservative_hybrid", "balanced_hybrid", "aggressive_hybrid", "balanced_advantage", "multi_asset", "arbitrage", "equity_savings"],
+    "Others": ["solution_oriented", "fof"],
 }
 
 class MutualFundAnalyzer:
@@ -198,7 +236,7 @@ class MutualFundAnalyzer:
                 transactions.append({
                     "date": sip_date.strftime("%Y-%m-%d"),
                     "type": "SIP Purchase",
-                    "amount": monthly_amount,
+                    "amount": -monthly_amount,  # negative = cash outflow
                     "nav": round(nav, 4),
                     "units": round(units, 6),
                     "cumulative_units": round(total_units, 6),
@@ -219,7 +257,7 @@ class MutualFundAnalyzer:
             transactions.append({
                 "date": end.strftime("%Y-%m-%d"),
                 "type": "Redemption (hypothetical)",
-                "amount": round(final_value, 2),
+                "amount": round(final_value, 2),  # positive = cash inflow
                 "nav": round(nav_end, 4),
                 "units": round(total_units, 6),
                 "cumulative_units": 0,
