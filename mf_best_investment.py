@@ -376,7 +376,7 @@ class MutualFundAnalyzer:
         categories: Optional[List[str]] = None,
         sip_day: int = 1,
         plan_type: str = "both",  # "direct", "regular", "both"
-        max_schemes: int = 50,
+        max_schemes: int = 100,
         collect_transactions: bool = False,
     ) -> pd.DataFrame:
         """

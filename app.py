@@ -35,17 +35,23 @@ with st.sidebar:
         sip_day = 1
 
     st.subheader("Scheme types (categories)")
+    index_only = st.checkbox("Index funds only", value=False)
+
     selected_cats = []
-    for group, cats in CATEGORY_GROUPS.items():
-        with st.expander(f"{group} ({len(cats)} types)", expanded=(group == "Equity")):
-            group_selected = st.multiselect(
-                f"Select {group}",
-                options=cats,
-                default=["large_cap", "mid_cap", "small_cap", "flexi_cap"] if group == "Equity" else [],
-                format_func=lambda x: x.replace("_", " ").title(),
-                key=f"cat_{group}",
-            )
-            selected_cats.extend(group_selected)
+    if index_only:
+        selected_cats = ["index"]
+        st.info("Only Index funds will be analysed.")
+    else:
+        for group, cats in CATEGORY_GROUPS.items():
+            with st.expander(f"{group} ({len(cats)} types)", expanded=(group == "Equity")):
+                group_selected = st.multiselect(
+                    f"Select {group}",
+                    options=cats,
+                    default=["large_cap", "mid_cap", "small_cap", "flexi_cap"] if group == "Equity" else [],
+                    format_func=lambda x: x.replace("_", " ").title(),
+                    key=f"cat_{group}",
+                )
+                selected_cats.extend(group_selected)
 
     plan_type = st.radio(
         "Plan type",
@@ -54,7 +60,14 @@ with st.sidebar:
         horizontal=True,
     )
 
-    max_schemes = st.slider("Max schemes to analyse", 10, 80, 40)
+    max_schemes = st.number_input(
+        "Max schemes to analyse (higher = slower)",
+        min_value=10,
+        max_value=500,
+        value=100,
+        step=10,
+        help="No hard cap. Higher numbers take longer because each scheme needs an API call.",
+    )
 
     st.subheader("Portfolio constraints")
     max_funds = st.slider("Max total funds in portfolio", 1, 10, 5)
