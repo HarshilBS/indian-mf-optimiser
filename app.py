@@ -302,7 +302,9 @@ if st.session_state.results is not None:
         # Downloads
         st.subheader("Downloads")
 
-        results_df = df.drop(columns=["transactions"], errors="ignore")
+        results_df = df.drop(columns=["transactions"], errors="ignore").copy()
+        results_df.insert(0, "start_date", locked_start.strftime("%Y-%m-%d"))
+        results_df.insert(1, "end_date", locked_end.strftime("%Y-%m-%d"))
         csv = results_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             "📥 Download ranked results (CSV)",
@@ -318,6 +320,8 @@ if st.session_state.results is not None:
                 if isinstance(txs, list) and txs:
                     for tx in txs:
                         tx_row = {
+                            "start_date": locked_start.strftime("%Y-%m-%d"),
+                            "end_date": locked_end.strftime("%Y-%m-%d"),
                             "scheme_code": row["scheme_code"],
                             "scheme_name": row["scheme_name"],
                             "plan": row.get("plan", ""),
