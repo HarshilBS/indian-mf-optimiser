@@ -26,6 +26,7 @@ app_mode = st.radio(
 with st.sidebar:
     st.header("Parameters")
 
+    selected_cats = []
     if app_mode == "Find Best Funds (Optimiser)":
         mode = st.radio("Investment type", ["SIP", "Lumpsum"], horizontal=True)
     elif app_mode == "Best For & Later (Out-of-Sample)":
