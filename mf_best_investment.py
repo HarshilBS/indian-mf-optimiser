@@ -16,8 +16,169 @@ import math
 
 BASE_URL = "https://api.mfapi.in"
 
+def map_scheme_category(scheme_category: str, scheme_name: str = "") -> str:
+    """Map official scheme_category (and name) to a clean internal key.
+    Prioritises accurate SEBI classification, especially FoF vs Multi Asset.
+    """
+    if not scheme_category:
+        scheme_category = ""
+    cat = scheme_category.lower()
+    name = (scheme_name or "").lower()
+
+    # FoF / Omni FoF must be checked first (they are not Multi Asset Allocation Funds)
+    if "fund of fund" in cat or "fof" in cat or "fund of funds" in cat or "omni" in name:
+        if "multi asset" in cat or "multi-asset" in cat or "multi asset" in name:
+            return "multi_asset_fof"
+        if "equity" in cat:
+            return "equity_fof"
+        if "debt" in cat or "income" in cat:
+            return "debt_fof"
+        if "hybrid" in cat or "arbitrage" in cat:
+            return "hybrid_fof"
+        return "fof"
+
+    # Direct Multi Asset Allocation (not FoF)
+    if "multi asset" in cat or "multi-asset allocation" in cat:
+        return "multi_asset"
+
+    # Equity
+    if "large cap" in cat and "mid" not in cat:
+        return "large_cap"
+    if "mid cap" in cat and "large" not in cat:
+        return "mid_cap"
+    if "small cap" in cat:
+        return "small_cap"
+    if "large" in cat and "mid" in cat:
+        return "large_mid"
+    if "flexi" in cat:
+        return "flexi_cap"
+    if "multi cap" in cat:
+        return "multi_cap"
+    if "focused" in cat:
+        return "focused"
+    if "value" in cat or "contra" in cat:
+        return "value_contra"
+    if "dividend" in cat:
+        return "dividend_yield"
+    if "elss" in cat or "tax saver" in cat:
+        return "elss"
+    if "sectoral" in cat or "thematic" in cat:
+        return "sectoral_thematic"
+    if "index" in cat or "etf" in cat:
+        return "index"
+
+    # Debt
+    if "overnight" in cat:
+        return "overnight"
+    if "liquid" in cat:
+        return "liquid"
+    if "ultra short" in cat or "ultra-short" in cat:
+        return "ultra_short"
+    if "low duration" in cat:
+        return "low_duration"
+    if "money market" in cat:
+        return "money_market"
+    if "short duration" in cat:
+        return "short_duration"
+    if "medium duration" in cat and "long" not in cat:
+        return "medium_duration"
+    if "medium to long" in cat or "medium-to-long" in cat:
+        return "medium_to_long"
+    if "long duration" in cat:
+        return "long_duration"
+    if "dynamic bond" in cat:
+        return "dynamic_bond"
+    if "corporate bond" in cat:
+        return "corporate_bond"
+    if "credit risk" in cat:
+        return "credit_risk"
+    if "banking" in cat and "psu" in cat:
+        return "banking_psu"
+    if "10 year" in cat or "constant maturity" in cat:
+        return "gilt_10y"
+    if "gilt" in cat:
+        return "gilt"
+    if "floater" in cat:
+        return "floater"
+
+    # Hybrid
+    if "conservative hybrid" in cat or "conservative allocation" in cat:
+        return "conservative_hybrid"
+    if "balanced hybrid" in cat or ("balanced" in cat and "advantage" not in cat and "aggressive" not in cat):
+        return "balanced_hybrid"
+    if "aggressive hybrid" in cat:
+        return "aggressive_hybrid"
+    if "balanced advantage" in cat or "dynamic asset allocation" in cat:
+        return "balanced_advantage"
+    if "arbitrage" in cat:
+        return "arbitrage"
+    if "equity savings" in cat:
+        return "equity_savings"
+
+    # Fallback
+    if "equity" in cat:
+        return "equity_other"
+    if "debt" in cat:
+        return "debt_other"
+    if "hybrid" in cat:
+        return "hybrid_other"
+    return "other"
+
+
 # Comprehensive SEBI category keywords (Equity, Debt, Hybrid, etc.)
 CATEGORY_KEYWORDS = {
+    # Equity
+    "large_cap": ["Large Cap"],
+    "mid_cap": ["Mid Cap"],
+    "small_cap": ["Small Cap"],
+    "large_mid": ["Large & Mid Cap", "Large and Mid Cap"],
+    "flexi_cap": ["Flexi Cap", "Flexicap"],
+    "multi_cap": ["Multi Cap", "Multicap"],
+    "focused": ["Focused"],
+    "value_contra": ["Value", "Contra"],
+    "dividend_yield": ["Dividend Yield"],
+    "elss": ["ELSS", "Tax Saver"],
+    "sectoral_thematic": ["Sectoral", "Thematic"],
+    "index": ["Index"],
+    # Debt
+    "overnight": ["Overnight"],
+    "liquid": ["Liquid"],
+    "ultra_short": ["Ultra Short", "Ultra-Short"],
+    "low_duration": ["Low Duration"],
+    "money_market": ["Money Market"],
+    "short_duration": ["Short Duration"],
+    "medium_duration": ["Medium Duration"],
+    "medium_to_long": ["Medium to Long"],
+    "long_duration": ["Long Duration"],
+    "dynamic_bond": ["Dynamic Bond"],
+    "corporate_bond": ["Corporate Bond"],
+    "credit_risk": ["Credit Risk"],
+    "banking_psu": ["Banking and PSU", "Banking & PSU"],
+    "gilt": ["Gilt"],
+    "gilt_10y": ["10 Year Constant Maturity", "Constant Maturity"],
+    "floater": ["Floater"],
+    # Hybrid
+    "conservative_hybrid": ["Conservative Hybrid", "Conservative Allocation"],
+    "balanced_hybrid": ["Balanced Hybrid", "Balanced"],
+    "aggressive_hybrid": ["Aggressive Hybrid", "Aggressive"],
+    "balanced_advantage": ["Balanced Advantage", "Dynamic Asset Allocation"],
+    "multi_asset": ["Multi Asset", "Multi-Asset"],
+    "arbitrage": ["Arbitrage"],
+    "equity_savings": ["Equity Savings"],
+    # FoF (separate from Multi Asset)
+    "fof": ["Fund of Funds", "FOF", "Omni"],
+    "multi_asset_fof": ["Multi Asset Omni", "Multi-Asset Omni"],
+    # Others
+    "solution_oriented": ["Retirement", "Children"],
+}
+
+# Grouped for UI display
+CATEGORY_GROUPS = {
+    "Equity": ["large_cap", "mid_cap", "small_cap", "large_mid", "flexi_cap", "multi_cap", "focused", "value_contra", "dividend_yield", "elss", "sectoral_thematic", "index"],
+    "Debt": ["overnight", "liquid", "ultra_short", "low_duration", "money_market", "short_duration", "medium_duration", "medium_to_long", "long_duration", "dynamic_bond", "corporate_bond", "credit_risk", "banking_psu", "gilt", "gilt_10y", "floater"],
+    "Hybrid": ["conservative_hybrid", "balanced_hybrid", "aggressive_hybrid", "balanced_advantage", "multi_asset", "arbitrage", "equity_savings"],
+    "FoF / Others": ["fof", "multi_asset_fof", "solution_oriented"],
+}
     # Equity
     "large_cap": ["Large Cap"],
     "mid_cap": ["Mid Cap"],
@@ -76,31 +237,79 @@ class MutualFundAnalyzer:
         self.session.headers.update({"User-Agent": "MFAnalyzer/1.0"})
 
     def search_schemes(self, query: str) -> List[Dict]:
-        """Search schemes by name, ISIN, or code. Returns enriched results when possible."""
+        """Search schemes and enrich with fund house, category, ISIN, and latest NAV info."""
         url = f"{BASE_URL}/mf/search"
         resp = self.session.get(url, params={"q": query}, timeout=30)
         resp.raise_for_status()
         time.sleep(self.delay)
         results = resp.json()
-        # Enrich top results with meta (fund house, category, ISIN) for better UX
         enriched = []
-        for s in results[:15]:
+        for s in results[:12]:
             code = s.get("schemeCode")
             try:
                 meta_resp = self.session.get(f"{BASE_URL}/mf/{code}/latest", timeout=20)
                 meta_resp.raise_for_status()
-                meta = meta_resp.json().get("meta", {})
+                full = meta_resp.json()
+                meta = full.get("meta", {})
+                latest = full.get("data", [{}])[0] if full.get("data") else {}
                 enriched.append({
                     "schemeCode": code,
                     "schemeName": s.get("schemeName"),
                     "fund_house": meta.get("fund_house", ""),
                     "scheme_category": meta.get("scheme_category", ""),
                     "isin_growth": meta.get("isin_growth", ""),
+                    "latest_nav": latest.get("nav"),
+                    "latest_date": latest.get("date"),
                 })
-                time.sleep(0.1)
+                time.sleep(0.08)
             except Exception:
                 enriched.append(s)
         return enriched or results
+
+    def get_portfolio_xirr(self, holdings_df: pd.DataFrame) -> Optional[float]:
+        """Compute portfolio-level XIRR from all holdings' cash flows.
+        Expects a DataFrame with optional 'transactions' column (list of dicts with date + amount).
+        """
+        all_cashflows = []
+        for _, row in holdings_df.iterrows():
+            txs = row.get("transactions")
+            if isinstance(txs, list):
+                for tx in txs:
+                    try:
+                        dt = datetime.strptime(tx["date"], "%Y-%m-%d")
+                        amt = float(tx["amount"])
+                        all_cashflows.append((dt, amt))
+                    except Exception:
+                        continue
+            # Fallback: if no detailed tx, approximate with start investment and end value
+            elif "invested" in row and "final_value" in row:
+                # crude approximation (less accurate)
+                pass
+        if len(all_cashflows) < 2:
+            return None
+        return self.compute_xirr(all_cashflows)
+
+    def get_benchmark_curve(
+        self,
+        benchmark_code: int,
+        start: datetime,
+        end: datetime,
+        invested_amount: float,
+    ) -> pd.DataFrame:
+        """Simple lumpsum equity curve for a benchmark scheme (e.g. Nifty 50 index fund)."""
+        data = self.get_scheme_meta_and_nav(
+            benchmark_code,
+            start.strftime("%Y-%m-%d"),
+            end.strftime("%Y-%m-%d"),
+        )
+        if not data:
+            return pd.DataFrame()
+        df_nav = self.parse_nav_series(data.get("data", []))
+        if df_nav.empty:
+            return pd.DataFrame()
+        return self.generate_equity_curve(
+            df_nav, start, end, "lumpsum", invested_amount, weight=1.0
+        )
 
     def get_scheme_meta_and_nav(
         self, scheme_code: int, start_date: str, end_date: str
@@ -453,6 +662,7 @@ class MutualFundAnalyzer:
                 "scheme_name": meta.get("scheme_name", name_query or ""),
                 "fund_house": meta.get("fund_house", ""),
                 "category": meta.get("scheme_category", ""),
+                "category_key": map_scheme_category(meta.get("scheme_category", ""), meta.get("scheme_name", "")),
                 "mode": mode,
                 "frequency": frequency if mode == "sip" else "lumpsum",
                 "amount": amount,
@@ -570,8 +780,8 @@ class MutualFundAnalyzer:
                 "scheme_code": code,
                 "scheme_name": name,
                 "fund_house": meta.get("fund_house", ""),
-                "category": meta.get("scheme_category", info.get("category_query", "")),
-                "category_key": info.get("category_query", ""),
+                "category": meta.get("scheme_category", ""),
+                "category_key": map_scheme_category(meta.get("scheme_category", ""), name),
                 "plan": "Direct" if is_direct else "Regular",
                 "mode": mode,
                 **calc,
@@ -592,24 +802,40 @@ class MutualFundAnalyzer:
         max_funds: int = 5,
         max_exposure_per_fund: float = 0.3,
         min_exposure_per_fund: float = 0.05,
-        constraint_mode: str = "count",  # "count" or "percentage"
+        constraint_mode: str = "count",
         category_count_limits: Optional[Dict[str, Tuple[int, int]]] = None,
         category_pct_limits: Optional[Dict[str, Tuple[float, float]]] = None,
+        selection: str = "best",  # best, median, average, worst
     ) -> pd.DataFrame:
         """
         Build portfolio.
-        constraint_mode:
-          - "count": min/max number of funds per category
-          - "percentage": min/max % exposure per category (with rebalancing)
+        selection:
+          - best: top-ranked funds
+          - median: funds around the median rank
+          - average: equal-weight sample from middle of the ranked list
+          - worst: bottom-ranked funds (still respecting constraints)
         """
         if ranked_df.empty:
             return ranked_df
 
-        df = ranked_df.copy()
+        df = ranked_df.copy().reset_index(drop=True)
         if "category_key" not in df.columns:
             df["category_key"] = df.get("category", "")
 
-        # Select funds
+        n_total = len(df)
+        if selection == "worst":
+            df = df.iloc[::-1].reset_index(drop=True)  # reverse so worst is first
+        elif selection == "median":
+            mid = n_total // 2
+            start = max(0, mid - max_funds)
+            df = df.iloc[start:start + max_funds * 3].reset_index(drop=True)
+        elif selection == "average":
+            # take a spread from the middle 50%
+            start = n_total // 4
+            end = start + n_total // 2
+            df = df.iloc[start:end].reset_index(drop=True)
+
+        # Select funds (same logic as before)
         selected = []
         if constraint_mode == "count" and category_count_limits:
             cat_counts = {k: 0 for k in category_count_limits}
@@ -624,7 +850,6 @@ class MutualFundAnalyzer:
                 selected.append(row)
                 if cat in cat_counts:
                     cat_counts[cat] += 1
-            # Fill minimums
             for cat, (min_c, _) in category_count_limits.items():
                 while cat_counts.get(cat, 0) < min_c and len(selected) < max_funds:
                     already = {r["scheme_code"] for r in selected}
@@ -635,7 +860,6 @@ class MutualFundAnalyzer:
                     selected.append(row)
                     cat_counts[cat] = cat_counts.get(cat, 0) + 1
         else:
-            # Default / percentage mode: just take top funds
             selected = [row for _, row in df.head(max_funds).iterrows()]
 
         if not selected:
@@ -644,28 +868,22 @@ class MutualFundAnalyzer:
         top = pd.DataFrame(selected).reset_index(drop=True)
         n = len(top)
 
-        # Initial equal weights
+        # Equal weights + per-fund limits
         weights = [1.0 / n] * n
-
-        # Apply per-fund max/min
         weights = [min(max(w, min_exposure_per_fund), max_exposure_per_fund) for w in weights]
         total = sum(weights)
         if total > 0:
             weights = [w / total for w in weights]
 
-        # Percentage rebalancing mode
+        # Percentage rebalancing
         if constraint_mode == "percentage" and category_pct_limits:
-            # Simple iterative rebalancing toward category targets
             cat_to_indices = {}
             for i, row in top.iterrows():
                 cat = row.get("category_key", "")
                 cat_to_indices.setdefault(cat, []).append(i)
 
-            for _ in range(10):  # a few rebalancing passes
-                cat_sums = {}
-                for cat, idxs in cat_to_indices.items():
-                    cat_sums[cat] = sum(weights[i] for i in idxs)
-
+            for _ in range(10):
+                cat_sums = {cat: sum(weights[i] for i in idxs) for cat, idxs in cat_to_indices.items()}
                 changed = False
                 for cat, (min_p, max_p) in category_pct_limits.items():
                     current = cat_sums.get(cat, 0.0)
@@ -688,17 +906,16 @@ class MutualFundAnalyzer:
                 if not changed:
                     break
 
-            # Final clip to per-fund limits and renormalize
             weights = [min(max(w, min_exposure_per_fund), max_exposure_per_fund) for w in weights]
             total = sum(weights)
             if total > 0:
                 weights = [w / total for w in weights]
-        # "percentage_no_rebalance" leaves the equal weights as-is (only per-fund limits applied)
 
         top["weight"] = weights
-        cols = ["rank", "scheme_code", "scheme_name", "category_key", "category", "plan", "abs_return_pct", "weight"]
+        top["selection"] = selection
+        cols = ["rank", "scheme_code", "scheme_name", "category_key", "category", "plan", "abs_return_pct", "weight", "selection"]
         if "xirr_pct" in top.columns:
-            cols.insert(-1, "xirr_pct")
+            cols.insert(-2, "xirr_pct")
         return top[[c for c in cols if c in top.columns]]
 
 

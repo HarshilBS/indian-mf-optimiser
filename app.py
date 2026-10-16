@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
+import plotly.graph_objects as go
 from mf_best_investment import MutualFundAnalyzer, CATEGORY_KEYWORDS, CATEGORY_GROUPS
 
 st.set_page_config(
@@ -17,7 +18,7 @@ st.markdown(
 
 app_mode = st.radio(
     "What do you want to do?",
-    ["Find Best Funds (Optimiser)", "Analyse My Portfolio"],
+    ["Find Best Funds (Optimiser)", "Analyse My Portfolio", "Best For & Later (Out-of-Sample)"],
     horizontal=True,
 )
 
@@ -27,14 +28,34 @@ with st.sidebar:
 
     if app_mode == "Find Best Funds (Optimiser)":
         mode = st.radio("Investment type", ["SIP", "Lumpsum"], horizontal=True)
+    elif app_mode == "Best For & Later (Out-of-Sample)":
+        mode = st.radio("Investment type", ["SIP", "Lumpsum"], horizontal=True)
+        st.info("Pick the portfolio on the **selection period**, then see how it performed in the **later period**.")
     else:
         mode = "custom"
 
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start date", value=date(2023, 1, 1))
+        start_date = st.date_input("Start date", value=date(2023, 1, 1), key="start_main")
     with col2:
-        end_date = st.date_input("End date", value=date(2024, 12, 31))
+        end_date = st.date_input("End date", value=date(2024, 12, 31), key="end_main")
+
+    if app_mode == "Best For & Later (Out-of-Sample)":
+        st.subheader("Selection period (choose the best portfolio)")
+        c1, c2 = st.columns(2)
+        with c1:
+            sel_start = st.date_input("Selection start", value=date(2025, 1, 1), key="sel_start")
+        with c2:
+            sel_end = st.date_input("Selection end", value=date(2025, 12, 31), key="sel_end")
+        st.subheader("Later period (out-of-sample)")
+        c3, c4 = st.columns(2)
+        with c3:
+            later_start = st.date_input("Later start", value=date(2026, 1, 1), key="later_start")
+        with c4:
+            later_end = st.date_input("Later end", value=date.today(), key="later_end")
+        # Override main dates for selection
+        start_date = sel_start
+        end_date = sel_end
 
     if app_mode == "Find Best Funds (Optimiser)":
         if mode == "SIP":
@@ -142,7 +163,7 @@ with st.sidebar:
                     results = analyzer_search.search_schemes(search_q)
                 if results:
                     options = {
-                        f"{r.get('schemeName', '')} | {r.get('fund_house', '')} | {r.get('scheme_category', '')} | ISIN: {r.get('isin_growth', 'N/A')} (Code: {r.get('schemeCode')})": r
+                        f"{r.get('schemeName', '')} | {r.get('fund_house', '')} | {r.get('scheme_category', '')} | ISIN: {r.get('isin_growth', 'N/A')} | NAV: {r.get('latest_nav', '—')} ({r.get('latest_date', '')}) (Code: {r.get('schemeCode')})": r
                         for r in results
                     }
                     choice = st.selectbox(
@@ -299,19 +320,24 @@ if run:
             )
 
             portfolio = None
+            portfolios = {}
             if not df.empty:
-                portfolio = analyzer.suggest_portfolio(
-                    df,
-                    max_funds=max_funds,
-                    max_exposure_per_fund=max_exposure,
-                    min_exposure_per_fund=min_exposure,
-                    constraint_mode=constraint_mode,
-                    category_count_limits=category_count_limits if constraint_mode == "count" else None,
-                    category_pct_limits=category_pct_limits if constraint_mode in ("percentage", "percentage_no_rebalance") else None,
-                )
+                for sel in ["best", "median", "average", "worst"]:
+                    portfolios[sel] = analyzer.suggest_portfolio(
+                        df,
+                        max_funds=max_funds,
+                        max_exposure_per_fund=max_exposure,
+                        min_exposure_per_fund=min_exposure,
+                        constraint_mode=constraint_mode,
+                        category_count_limits=category_count_limits if constraint_mode == "count" else None,
+                        category_pct_limits=category_pct_limits if constraint_mode in ("percentage", "percentage_no_rebalance") else None,
+                        selection=sel,
+                    )
+                portfolio = portfolios.get("best")
 
             st.session_state.results = df
             st.session_state.portfolio = portfolio
+            st.session_state.portfolios = portfolios
             st.session_state.locked_dates = (locked_start, locked_end)
             st.session_state.run_params = {
                 "mode": mode,
@@ -320,7 +346,15 @@ if run:
                 "start_date": start_date,
                 "end_date": end_date,
             }
-            st.session_state.app_mode = "optimiser"
+            st.session_state.app_mode = "optimiser" if app_mode != "Best For & Later (Out-of-Sample)" else "oos"
+            if app_mode == "Best For & Later (Out-of-Sample)":
+                st.session_state.oos_params = {
+                    "later_start": later_start,
+                    "later_end": later_end,
+                    "mode": mode,
+                    "amount": amount,
+                    "sip_day": sip_day,
+                }
 
 # Display stored results (persists across reruns)
 if st.session_state.results is not None:
@@ -329,6 +363,7 @@ if st.session_state.results is not None:
     locked_start, locked_end = st.session_state.locked_dates or (start_date, end_date)
     params = st.session_state.run_params or {}
     is_custom = params.get("mode") == "custom" or st.session_state.get("app_mode") == "custom"
+    is_oos = st.session_state.get("app_mode") == "oos"
 
     if locked_start != start_date or locked_end != end_date:
         st.info(
@@ -346,11 +381,20 @@ if st.session_state.results is not None:
             total_inv = df["invested"].sum()
             total_final = df["final_value"].sum()
             overall_ret = (total_final / total_inv - 1) * 100 if total_inv else 0
-            st.metric("Total Invested", f"₹{total_inv:,.0f}")
-            st.metric("Final Value", f"₹{total_final:,.0f}")
-            st.metric("Overall Absolute Return", f"{overall_ret:.2f}%")
 
-            display_cols = ["scheme_name", "mode", "frequency", "amount", "invested", "final_value", "abs_return_pct", "xirr_pct"]
+            # Portfolio XIRR
+            analyzer_xirr = MutualFundAnalyzer(rate_limit_delay=0.1)
+            port_xirr = analyzer_xirr.get_portfolio_xirr(df)
+            port_xirr_pct = port_xirr * 100 if port_xirr is not None else None
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Invested", f"₹{total_inv:,.0f}")
+            c2.metric("Final Value", f"₹{total_final:,.0f}")
+            c3.metric("Absolute Return", f"{overall_ret:.2f}%")
+            if port_xirr_pct is not None:
+                st.metric("Portfolio XIRR", f"{port_xirr_pct:.2f}%")
+
+            display_cols = ["scheme_name", "category_key", "mode", "frequency", "amount", "invested", "final_value", "abs_return_pct", "xirr_pct"]
             display_cols = [c for c in display_cols if c in df.columns]
             st.dataframe(
                 df[display_cols].style.format({
@@ -384,25 +428,101 @@ if st.session_state.results is not None:
                 hide_index=True,
             )
 
-            st.subheader("Suggested Portfolio")
-            if portfolio is not None and not portfolio.empty:
-                port_cols = [c for c in ["rank", "scheme_name", "plan", "category_key", "abs_return_pct", "weight"] if c in portfolio.columns]
-                if "xirr_pct" in portfolio.columns:
-                    port_cols.insert(-1, "xirr_pct")
-                st.dataframe(
-                    portfolio[port_cols].style.format({
-                        "abs_return_pct": "{:.2f}%",
-                        "xirr_pct": "{:.2f}%",
-                        "weight": "{:.1%}",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                if "weight" in portfolio.columns:
-                    st.bar_chart(portfolio.set_index("scheme_name")["weight"])
-                if "category_key" in portfolio.columns:
-                    summary = portfolio.groupby("category_key")["weight"].sum()
-                    st.caption("Category exposure: " + ", ".join(f"{k}: {v:.1%}" for k, v in summary.items()))
+            st.subheader("Suggested Portfolios")
+            portfolios = st.session_state.get("portfolios", {"best": portfolio})
+            tabs = st.tabs(["Best", "Median", "Average", "Worst"])
+            for tab, key in zip(tabs, ["best", "median", "average", "worst"]):
+                with tab:
+                    p = portfolios.get(key)
+                    if p is not None and not p.empty:
+                        port_cols = [c for c in ["rank", "scheme_name", "plan", "category_key", "abs_return_pct", "weight", "selection"] if c in p.columns]
+                        if "xirr_pct" in p.columns:
+                            port_cols.insert(-2, "xirr_pct")
+                        st.dataframe(
+                            p[port_cols].style.format({
+                                "abs_return_pct": "{:.2f}%",
+                                "xirr_pct": "{:.2f}%",
+                                "weight": "{:.1%}",
+                            }),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        if "weight" in p.columns:
+                            st.bar_chart(p.set_index("scheme_name")["weight"])
+                        # Weighted average return
+                        if "abs_return_pct" in p.columns and "weight" in p.columns:
+                            wavg = (p["abs_return_pct"] * p["weight"]).sum()
+                            st.caption(f"Weighted absolute return: **{wavg:.2f}%**")
+                    else:
+                        st.info(f"Could not build {key} portfolio.")
+
+            # Out-of-sample evaluation
+            if is_oos and st.session_state.get("oos_params"):
+                oos = st.session_state.oos_params
+                later_start = oos["later_start"]
+                later_end = oos["later_end"]
+                st.subheader(f"Out-of-Sample Performance ({later_start} → {later_end})")
+                st.caption("Same funds and weights chosen on the selection period, evaluated on the later period.")
+
+                best_port = portfolios.get("best")
+                if best_port is not None and not best_port.empty:
+                    with st.spinner("Calculating out-of-sample returns..."):
+                        analyzer_oos = MutualFundAnalyzer(rate_limit_delay=0.15)
+                        oos_results = []
+                        for _, prow in best_port.iterrows():
+                            code = prow.get("scheme_code")
+                            if not code:
+                                continue
+                            nav_data = analyzer_oos.get_scheme_meta_and_nav(
+                                int(code),
+                                later_start.strftime("%Y-%m-%d"),
+                                later_end.strftime("%Y-%m-%d"),
+                            )
+                            if not nav_data:
+                                continue
+                            df_nav = analyzer_oos.parse_nav_series(nav_data.get("data", []))
+                            weight = prow.get("weight", 1.0 / len(best_port))
+                            if oos["mode"] == "SIP":
+                                calc = analyzer_oos.calculate_sip_return(
+                                    df_nav,
+                                    datetime.combine(later_start, datetime.min.time()),
+                                    datetime.combine(later_end, datetime.min.time()),
+                                    oos["amount"] * weight,
+                                    "monthly",
+                                    oos["sip_day"],
+                                )
+                            else:
+                                calc = analyzer_oos.calculate_lumpsum_return(
+                                    df_nav,
+                                    datetime.combine(later_start, datetime.min.time()),
+                                    datetime.combine(later_end, datetime.min.time()),
+                                    oos["amount"] * weight,
+                                )
+                            if calc:
+                                oos_results.append({
+                                    "scheme_name": prow["scheme_name"],
+                                    "weight": weight,
+                                    **calc,
+                                })
+
+                        if oos_results:
+                            oos_df = pd.DataFrame(oos_results)
+                            total_inv = oos_df["invested"].sum()
+                            total_final = oos_df["final_value"].sum()
+                            oos_ret = (total_final / total_inv - 1) * 100 if total_inv else 0
+                            st.metric("Out-of-Sample Absolute Return", f"{oos_ret:.2f}%")
+                            st.dataframe(
+                                oos_df[["scheme_name", "weight", "invested", "final_value", "abs_return_pct"]].style.format({
+                                    "weight": "{:.1%}",
+                                    "invested": "₹{:,.0f}",
+                                    "final_value": "₹{:,.0f}",
+                                    "abs_return_pct": "{:.2f}%",
+                                }),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.warning("Could not calculate out-of-sample returns.")
 
         # Equity curve (works for both)
         if not df.empty:
@@ -439,9 +559,124 @@ if st.session_state.results is not None:
                 if curves:
                     equity = pd.concat(curves, axis=1).ffill().fillna(0)
                     equity["Portfolio"] = equity.sum(axis=1)
-                    st.line_chart(equity[["Portfolio"]])
+
+                    # Build cumulative invested series for roller-coaster view
+                    invested_series = pd.Series(0.0, index=equity.index)
+                    for _, row in df.iterrows():
+                        txs = row.get("transactions")
+                        if isinstance(txs, list):
+                            for tx in txs:
+                                if tx.get("amount", 0) < 0:  # outflow = investment
+                                    try:
+                                        dt = pd.to_datetime(tx["date"])
+                                        if dt in invested_series.index:
+                                            invested_series.loc[dt:] += abs(tx["amount"])
+                                        else:
+                                            # add to nearest or forward fill later
+                                            invested_series.loc[invested_series.index >= dt] += abs(tx["amount"])
+                                    except Exception:
+                                        pass
+                        else:
+                            # fallback for lumpsum
+                            if row.get("mode") == "lumpsum" and row.get("invested"):
+                                invested_series += row["invested"]
+
+                    invested_series = invested_series.ffill().fillna(0)
+                    equity["Invested"] = invested_series
+
+                    # Optional benchmark overlay
+                    benchmark_choice = st.selectbox(
+                        "Overlay benchmark",
+                        ["None", "Nifty 50 Index Fund (example)"],
+                        key="bench",
+                    )
+                    if benchmark_choice != "None" and is_custom:
+                        nifty_code = 119598
+                        total_invested = df["invested"].sum()
+                        analyzer_bench = MutualFundAnalyzer(rate_limit_delay=0.1)
+                        bench_curve = analyzer_bench.get_benchmark_curve(
+                            nifty_code,
+                            datetime.combine(locked_start, datetime.min.time()),
+                            datetime.combine(locked_end, datetime.min.time()),
+                            total_invested,
+                        )
+                        if not bench_curve.empty:
+                            bench_curve = bench_curve.set_index("date").rename(columns={"value": "Nifty 50"})
+                            equity = equity.join(bench_curve, how="outer").ffill()
+
+                    # Static chart
+                    st.line_chart(equity[["Portfolio", "Invested"] + ([c for c in equity.columns if c == "Nifty 50"])])
+
+                    # Animated roller-coaster chart (Invested vs Current Value)
+                    st.subheader("🎢 Portfolio Roller Coaster")
+                    st.caption("Animated view of money invested vs current portfolio value over time.")
+
+                    anim_df = equity.reset_index().rename(columns={"index": "date"})
+                    if "date" not in anim_df.columns:
+                        anim_df = equity.reset_index()
+                    anim_df = anim_df.sort_values("date")
+
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=anim_df["date"],
+                        y=anim_df["Invested"],
+                        mode="lines",
+                        name="Invested",
+                        line=dict(color="#888", dash="dash"),
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=anim_df["date"],
+                        y=anim_df["Portfolio"],
+                        mode="lines",
+                        name="Current Value",
+                        line=dict(color="#00cc96", width=3),
+                    ))
+                    if "Nifty 50" in anim_df.columns:
+                        fig.add_trace(go.Scatter(
+                            x=anim_df["date"],
+                            y=anim_df["Nifty 50"],
+                            mode="lines",
+                            name="Nifty 50",
+                            line=dict(color="#636EFA", dash="dot"),
+                        ))
+
+                    # Animation frames
+                    frames = []
+                    for i in range(10, len(anim_df), max(1, len(anim_df)//40)):
+                        frames.append(go.Frame(
+                            data=[
+                                go.Scatter(x=anim_df["date"][:i], y=anim_df["Invested"][:i]),
+                                go.Scatter(x=anim_df["date"][:i], y=anim_df["Portfolio"][:i]),
+                            ] + ([go.Scatter(x=anim_df["date"][:i], y=anim_df["Nifty 50"][:i])] if "Nifty 50" in anim_df.columns else []),
+                            traces=[0, 1] + ([2] if "Nifty 50" in anim_df.columns else []),
+                        ))
+                    fig.frames = frames
+
+                    fig.update_layout(
+                        title="Invested vs Current Portfolio Value",
+                        xaxis_title="Date",
+                        yaxis_title="Value (₹)",
+                        updatemenus=[{
+                            "type": "buttons",
+                            "buttons": [
+                                {
+                                    "label": "▶ Play Roller Coaster",
+                                    "method": "animate",
+                                    "args": [None, {"frame": {"duration": 80, "redraw": True}, "fromcurrent": True}],
+                                },
+                                {
+                                    "label": "Pause",
+                                    "method": "animate",
+                                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+                                },
+                            ],
+                        }],
+                        height=500,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
                     with st.expander("Show individual fund curves"):
-                        st.line_chart(equity.drop(columns=["Portfolio"]))
+                        st.line_chart(equity.drop(columns=["Portfolio", "Invested"], errors="ignore"))
 
         # Downloads
         st.subheader("Downloads")
