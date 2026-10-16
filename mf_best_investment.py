@@ -188,19 +188,65 @@ class MutualFundAnalyzer:
             "nav_end": nav_end,
         }
 
-    def generate_sip_dates(self, start: datetime, end: datetime, sip_day: int = 1) -> List[datetime]:
-        """Generate monthly SIP dates on or after sip_day, within range."""
+    def generate_sip_dates(
+        self,
+        start: datetime,
+        end: datetime,
+        frequency: str = "monthly",  # daily, weekly, fortnightly, monthly, quarterly, semi_annually
+        sip_day: int = 1,
+    ) -> List[datetime]:
+        """Generate SIP dates based on frequency."""
         dates = []
-        current = start.replace(day=min(sip_day, 28))  # avoid month-end issues
+        if frequency == "daily":
+            current = start
+            while current <= end:
+                # Skip weekends roughly (NAV usually not on Sat/Sun, but we use nearest)
+                if current.weekday() < 5:
+                    dates.append(current)
+                current += timedelta(days=1)
+            return dates
+
+        if frequency == "weekly":
+            # Every 7 days, aligned to sip_day of week if possible, else start
+            current = start
+            # Move to next preferred weekday if sip_day is 1-7 (Mon-Sun)
+            if 1 <= sip_day <= 7:
+                days_ahead = (sip_day - 1 - current.weekday()) % 7
+                if days_ahead == 0 and current < start:
+                    days_ahead = 7
+                current += timedelta(days=days_ahead)
+            while current <= end:
+                dates.append(current)
+                current += timedelta(days=7)
+            return dates
+
+        if frequency == "fortnightly":
+            current = start
+            while current <= end:
+                dates.append(current)
+                current += timedelta(days=14)
+            return dates
+
+        # monthly / quarterly / semi_annually
+        months_step = {"monthly": 1, "quarterly": 3, "semi_annually": 6}.get(frequency, 1)
+        current = start.replace(day=min(sip_day, 28))
         if current < start:
-            current = (current.replace(day=1) + timedelta(days=32)).replace(day=min(sip_day, 28))
+            # advance one step
+            month = current.month + months_step
+            year = current.year + (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            current = current.replace(year=year, month=month, day=min(sip_day, 28))
+
         while current <= end:
             dates.append(current)
-            # Next month
-            if current.month == 12:
-                current = current.replace(year=current.year + 1, month=1, day=min(sip_day, 28))
-            else:
-                current = current.replace(month=current.month + 1, day=min(sip_day, 28))
+            month = current.month + months_step
+            year = current.year + (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            try:
+                current = current.replace(year=year, month=month, day=min(sip_day, 28))
+            except ValueError:
+                # fallback for short months
+                current = current.replace(year=year, month=month, day=28)
         return dates
 
     def calculate_sip_return(
@@ -208,14 +254,13 @@ class MutualFundAnalyzer:
         df: pd.DataFrame,
         start: datetime,
         end: datetime,
-        monthly_amount: float = 10000,
+        amount: float = 10000,
+        frequency: str = "monthly",
         sip_day: int = 1,
         return_transactions: bool = False,
     ) -> Optional[Dict]:
-        """Simulate SIP and compute absolute return + approximate XIRR.
-        Optionally return detailed transaction history.
-        """
-        sip_dates = self.generate_sip_dates(start, end, sip_day)
+        """Simulate SIP of any frequency and compute absolute return + XIRR."""
+        sip_dates = self.generate_sip_dates(start, end, frequency, sip_day)
         if not sip_dates:
             return None
 
@@ -228,15 +273,15 @@ class MutualFundAnalyzer:
             nav = self.get_nearest_nav(df, sip_date)
             if nav is None or nav == 0:
                 continue
-            units = monthly_amount / nav
+            units = amount / nav
             total_units += units
-            total_invested += monthly_amount
-            cashflows.append((sip_date, -monthly_amount))
+            total_invested += amount
+            cashflows.append((sip_date, -amount))
             if return_transactions:
                 transactions.append({
                     "date": sip_date.strftime("%Y-%m-%d"),
-                    "type": "SIP Purchase",
-                    "amount": -monthly_amount,  # negative = cash outflow
+                    "type": f"SIP Purchase ({frequency})",
+                    "amount": -amount,
                     "nav": round(nav, 4),
                     "units": round(units, 6),
                     "cumulative_units": round(total_units, 6),
@@ -257,7 +302,7 @@ class MutualFundAnalyzer:
             transactions.append({
                 "date": end.strftime("%Y-%m-%d"),
                 "type": "Redemption (hypothetical)",
-                "amount": round(final_value, 2),  # positive = cash inflow
+                "amount": round(final_value, 2),
                 "nav": round(nav_end, 4),
                 "units": round(total_units, 6),
                 "cumulative_units": 0,
@@ -272,6 +317,7 @@ class MutualFundAnalyzer:
             "units": total_units,
             "num_sips": len([cf for cf in cashflows if cf[1] < 0]),
             "nav_end": nav_end,
+            "frequency": frequency,
         }
         if return_transactions:
             result["transactions"] = transactions
@@ -284,12 +330,11 @@ class MutualFundAnalyzer:
         end: datetime,
         mode: str,
         amount: float,
+        frequency: str = "monthly",
         sip_day: int = 1,
         weight: float = 1.0,
     ) -> pd.DataFrame:
-        """Generate daily equity curve (portfolio value over time) for one scheme.
-        Returns DataFrame with columns: date, value
-        """
+        """Generate daily equity curve for one scheme (lumpsum or SIP of any frequency)."""
         if df_nav.empty:
             return pd.DataFrame()
 
@@ -306,11 +351,10 @@ class MutualFundAnalyzer:
             return df[["date", "value"]].reset_index(drop=True)
 
         # SIP mode
-        sip_dates = self.generate_sip_dates(start, end, sip_day)
+        sip_dates = self.generate_sip_dates(start, end, frequency, sip_day)
         if not sip_dates:
             return pd.DataFrame()
 
-        # Build cumulative units over time
         df = df.sort_values("date").reset_index(drop=True)
         cumulative_units = 0.0
         values = []
@@ -319,7 +363,6 @@ class MutualFundAnalyzer:
 
         for _, row in df.iterrows():
             current_date = row["date"]
-            # Apply any SIPs that fall on or before this date and haven't been applied
             while sip_idx < len(sip_dates) and sip_dates[sip_idx] <= current_date:
                 sip_nav = self.get_nearest_nav(df_nav, sip_dates[sip_idx])
                 if sip_nav and sip_nav > 0:
@@ -330,6 +373,82 @@ class MutualFundAnalyzer:
             dates.append(current_date)
 
         return pd.DataFrame({"date": dates, "value": values})
+
+    def analyze_custom_portfolio(
+        self,
+        holdings: List[Dict],
+        start_date: str,
+        end_date: str,
+        collect_transactions: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Analyze a custom investor portfolio.
+        holdings: list of dicts with keys:
+          - scheme_code or scheme_name
+          - mode: "lumpsum" or "sip"
+          - amount: float
+          - frequency: str (for SIP)
+          - sip_day: int (optional)
+        """
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        results = []
+
+        for h in holdings:
+            code = h.get("scheme_code")
+            name_query = h.get("scheme_name")
+            if not code and name_query:
+                search = self.search_schemes(name_query)
+                if search:
+                    code = search[0]["schemeCode"]
+                    name_query = search[0]["schemeName"]
+            if not code:
+                continue
+
+            data = self.get_scheme_meta_and_nav(int(code), start_date, end_date)
+            if not data:
+                continue
+            meta = data.get("meta", {})
+            df_nav = self.parse_nav_series(data.get("data", []))
+            if df_nav.empty:
+                continue
+
+            mode = h.get("mode", "sip").lower()
+            amount = float(h.get("amount", 10000))
+            frequency = h.get("frequency", "monthly")
+            sip_day = int(h.get("sip_day", 1))
+
+            if mode == "lumpsum":
+                calc = self.calculate_lumpsum_return(df_nav, start, end, amount)
+            else:
+                calc = self.calculate_sip_return(
+                    df_nav, start, end, amount, frequency, sip_day,
+                    return_transactions=collect_transactions,
+                )
+
+            if calc is None:
+                continue
+
+            results.append({
+                "scheme_code": code,
+                "scheme_name": meta.get("scheme_name", name_query or ""),
+                "fund_house": meta.get("fund_house", ""),
+                "category": meta.get("scheme_category", ""),
+                "mode": mode,
+                "frequency": frequency if mode == "sip" else "lumpsum",
+                "amount": amount,
+                **calc,
+            })
+
+        if not results:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(results)
+        # Portfolio totals
+        total_invested = df["invested"].sum()
+        total_final = df["final_value"].sum()
+        df["portfolio_weight"] = df["invested"] / total_invested if total_invested else 0
+        return df
 
     def compute_xirr(self, cashflows: List[Tuple[datetime, float]], guess: float = 0.1) -> Optional[float]:
         """Newton-Raphson XIRR. Cashflows: list of (date, amount) with negatives for investments."""
