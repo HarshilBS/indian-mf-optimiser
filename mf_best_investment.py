@@ -179,56 +179,6 @@ CATEGORY_GROUPS = {
     "Hybrid": ["conservative_hybrid", "balanced_hybrid", "aggressive_hybrid", "balanced_advantage", "multi_asset", "arbitrage", "equity_savings"],
     "FoF / Others": ["fof", "multi_asset_fof", "solution_oriented"],
 }
-    # Equity
-    "large_cap": ["Large Cap"],
-    "mid_cap": ["Mid Cap"],
-    "small_cap": ["Small Cap"],
-    "large_mid": ["Large & Mid Cap", "Large and Mid Cap"],
-    "flexi_cap": ["Flexi Cap", "Flexicap"],
-    "multi_cap": ["Multi Cap", "Multicap"],
-    "focused": ["Focused"],
-    "value_contra": ["Value", "Contra"],
-    "dividend_yield": ["Dividend Yield"],
-    "elss": ["ELSS", "Tax Saver"],
-    "sectoral_thematic": ["Sectoral", "Thematic"],
-    "index": ["Index"],
-    # Debt
-    "overnight": ["Overnight"],
-    "liquid": ["Liquid"],
-    "ultra_short": ["Ultra Short", "Ultra-Short"],
-    "low_duration": ["Low Duration"],
-    "money_market": ["Money Market"],
-    "short_duration": ["Short Duration"],
-    "medium_duration": ["Medium Duration"],
-    "medium_to_long": ["Medium to Long"],
-    "long_duration": ["Long Duration"],
-    "dynamic_bond": ["Dynamic Bond"],
-    "corporate_bond": ["Corporate Bond"],
-    "credit_risk": ["Credit Risk"],
-    "banking_psu": ["Banking and PSU", "Banking & PSU"],
-    "gilt": ["Gilt"],
-    "gilt_10y": ["10 Year Constant Maturity", "Constant Maturity"],
-    "floater": ["Floater"],
-    # Hybrid
-    "conservative_hybrid": ["Conservative Hybrid", "Conservative Allocation"],
-    "balanced_hybrid": ["Balanced Hybrid", "Balanced"],
-    "aggressive_hybrid": ["Aggressive Hybrid", "Aggressive"],
-    "balanced_advantage": ["Balanced Advantage", "Dynamic Asset Allocation"],
-    "multi_asset": ["Multi Asset", "Multi-Asset"],
-    "arbitrage": ["Arbitrage"],
-    "equity_savings": ["Equity Savings"],
-    # Others
-    "solution_oriented": ["Retirement", "Children"],
-    "fof": ["Fund of Funds", "FOF"],
-}
-
-# Grouped for UI display
-CATEGORY_GROUPS = {
-    "Equity": ["large_cap", "mid_cap", "small_cap", "large_mid", "flexi_cap", "multi_cap", "focused", "value_contra", "dividend_yield", "elss", "sectoral_thematic", "index"],
-    "Debt": ["overnight", "liquid", "ultra_short", "low_duration", "money_market", "short_duration", "medium_duration", "medium_to_long", "long_duration", "dynamic_bond", "corporate_bond", "credit_risk", "banking_psu", "gilt", "gilt_10y", "floater"],
-    "Hybrid": ["conservative_hybrid", "balanced_hybrid", "aggressive_hybrid", "balanced_advantage", "multi_asset", "arbitrage", "equity_savings"],
-    "Others": ["solution_oriented", "fof"],
-}
 
 class MutualFundAnalyzer:
     def __init__(self, rate_limit_delay: float = 0.2):
