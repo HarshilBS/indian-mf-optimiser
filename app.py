@@ -130,7 +130,38 @@ with st.sidebar:
         holdings = []
         for i in range(int(num_holdings)):
             st.markdown(f"**Holding {i+1}**")
-            scheme = st.text_input(f"Scheme name or code {i+1}", key=f"sch_{i}", placeholder="e.g. HDFC Flexi Cap Direct Growth")
+            search_q = st.text_input(
+                f"Search scheme (name / ISIN / code / fund house) {i+1}",
+                key=f"search_{i}",
+                placeholder="e.g. HDFC Flexi Cap or INF179K01BB2",
+            )
+            selected_scheme = None
+            if search_q and len(search_q) >= 3:
+                with st.spinner("Searching..."):
+                    analyzer_search = MutualFundAnalyzer(rate_limit_delay=0.15)
+                    results = analyzer_search.search_schemes(search_q)
+                if results:
+                    options = {
+                        f"{r.get('schemeName', '')} | {r.get('fund_house', '')} | {r.get('scheme_category', '')} | ISIN: {r.get('isin_growth', 'N/A')} (Code: {r.get('schemeCode')})": r
+                        for r in results
+                    }
+                    choice = st.selectbox(
+                        f"Select scheme {i+1}",
+                        options=["-- Choose a scheme --"] + list(options.keys()),
+                        key=f"choice_{i}",
+                    )
+                    if choice != "-- Choose a scheme --":
+                        selected_scheme = options[choice]
+                        st.success(
+                            f"✅ Selected: **{selected_scheme.get('schemeName')}**  \n"
+                            f"Fund House: {selected_scheme.get('fund_house', '—')}  \n"
+                            f"Category: {selected_scheme.get('scheme_category', '—')}  \n"
+                            f"ISIN: {selected_scheme.get('isin_growth', '—')}  \n"
+                            f"Code: {selected_scheme.get('schemeCode')}"
+                        )
+                else:
+                    st.warning("No schemes found. Try a different search term.")
+
             h_mode = st.radio(f"Type {i+1}", ["SIP", "Lumpsum"], horizontal=True, key=f"mode_{i}")
             h_amount = st.number_input(f"Amount (₹) {i+1}", min_value=100, value=10000, step=500, key=f"amt_{i}")
             if h_mode == "SIP":
@@ -144,9 +175,11 @@ with st.sidebar:
             else:
                 freq = "lumpsum"
                 sip_day = 1
-            if scheme:
+
+            if selected_scheme:
                 holdings.append({
-                    "scheme_name": scheme,
+                    "scheme_code": selected_scheme.get("schemeCode"),
+                    "scheme_name": selected_scheme.get("schemeName"),
                     "mode": h_mode.lower(),
                     "amount": float(h_amount),
                     "frequency": freq,

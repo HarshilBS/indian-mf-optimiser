@@ -76,12 +76,31 @@ class MutualFundAnalyzer:
         self.session.headers.update({"User-Agent": "MFAnalyzer/1.0"})
 
     def search_schemes(self, query: str) -> List[Dict]:
-        """Search schemes by name query."""
+        """Search schemes by name, ISIN, or code. Returns enriched results when possible."""
         url = f"{BASE_URL}/mf/search"
         resp = self.session.get(url, params={"q": query}, timeout=30)
         resp.raise_for_status()
         time.sleep(self.delay)
-        return resp.json()
+        results = resp.json()
+        # Enrich top results with meta (fund house, category, ISIN) for better UX
+        enriched = []
+        for s in results[:15]:
+            code = s.get("schemeCode")
+            try:
+                meta_resp = self.session.get(f"{BASE_URL}/mf/{code}/latest", timeout=20)
+                meta_resp.raise_for_status()
+                meta = meta_resp.json().get("meta", {})
+                enriched.append({
+                    "schemeCode": code,
+                    "schemeName": s.get("schemeName"),
+                    "fund_house": meta.get("fund_house", ""),
+                    "scheme_category": meta.get("scheme_category", ""),
+                    "isin_growth": meta.get("isin_growth", ""),
+                })
+                time.sleep(0.1)
+            except Exception:
+                enriched.append(s)
+        return enriched or results
 
     def get_scheme_meta_and_nav(
         self, scheme_code: int, start_date: str, end_date: str
