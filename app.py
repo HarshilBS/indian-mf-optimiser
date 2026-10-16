@@ -113,10 +113,17 @@ with st.sidebar:
             options=["count", "percentage", "percentage_no_rebalance"],
             format_func=lambda x: {
                 "count": "Count of funds (min/max number)",
-                "percentage": "Percentage exposure (with rebalancing)",
+                "percentage": "Percentage exposure (with rebalancing simulation)",
                 "percentage_no_rebalance": "Percentage exposure (no rebalancing)",
             }[x],
         )
+        rebalance_freq = "quarterly"
+        if constraint_mode == "percentage":
+            rebalance_freq = st.selectbox(
+                "Rebalance frequency",
+                ["monthly", "quarterly", "semi_annually", "annually"],
+                index=1,
+            )
 
         category_count_limits = {}
         category_pct_limits = {}
@@ -336,6 +343,37 @@ if run:
                     )
                 portfolio = portfolios.get("best")
 
+            # True rebalancing simulation
+            rebalance_tx = []
+            if constraint_mode == "percentage" and portfolio is not None and not portfolio.empty:
+                try:
+                    best_p = portfolio
+                    target_weights = {int(r["scheme_code"]): float(r["weight"]) for _, r in best_p.iterrows() if r.get("scheme_code")}
+                    nav_series = {}
+                    analyzer_rb = MutualFundAnalyzer(rate_limit_delay=0.1)
+                    for code in list(target_weights.keys())[:8]:  # limit to avoid too many calls
+                        nav_data = analyzer_rb.get_scheme_meta_and_nav(
+                            code,
+                            locked_start.strftime("%Y-%m-%d"),
+                            locked_end.strftime("%Y-%m-%d"),
+                        )
+                        if nav_data:
+                            nav_series[code] = analyzer_rb.parse_nav_series(nav_data.get("data", []))
+                    if nav_series:
+                        rb_result = analyzer_rb.simulate_rebalancing(
+                            holdings=[],
+                            nav_series=nav_series,
+                            start=datetime.combine(locked_start, datetime.min.time()),
+                            end=datetime.combine(locked_end, datetime.min.time()),
+                            target_weights=target_weights,
+                            rebalance_freq=rebalance_freq,
+                            initial_amount=float(amount),
+                        )
+                        rebalance_tx = rb_result.get("transactions", [])
+                except Exception:
+                    rebalance_tx = []
+            st.session_state.rebalance_tx = rebalance_tx
+
             st.session_state.results = df
             st.session_state.portfolio = portfolio
             st.session_state.portfolios = portfolios
@@ -417,17 +455,22 @@ if st.session_state.results is not None:
                 display_cols.insert(6, "cagr_pct")
 
             st.subheader("Top Ranked Schemes")
-            st.dataframe(
-                df[[c for c in display_cols if c in df.columns]].head(20).style.format({
-                    "abs_return_pct": "{:.2f}%",
-                    "xirr_pct": "{:.2f}%",
-                    "cagr_pct": "{:.2f}%",
-                    "invested": "₹{:,.0f}",
-                    "final_value": "₹{:,.0f}",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
+            show_df = df[[c for c in display_cols if c in df.columns]].head(30)
+            try:
+                st.dataframe(
+                    show_df.style.format({
+                        "abs_return_pct": "{:.2f}%",
+                        "xirr_pct": "{:.2f}%",
+                        "cagr_pct": "{:.2f}%",
+                        "invested": "₹{:,.0f}",
+                        "final_value": "₹{:,.0f}",
+                    }, na_rep="—"),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=400,
+                )
+            except Exception:
+                st.dataframe(show_df, use_container_width=True, hide_index=True, height=400)
 
             st.subheader("Suggested Portfolios")
             portfolios = st.session_state.get("portfolios", {"best": portfolio})
@@ -439,15 +482,19 @@ if st.session_state.results is not None:
                         port_cols = [c for c in ["rank", "scheme_name", "plan", "category_key", "abs_return_pct", "weight", "selection"] if c in p.columns]
                         if "xirr_pct" in p.columns:
                             port_cols.insert(-2, "xirr_pct")
-                        st.dataframe(
-                            p[port_cols].style.format({
-                                "abs_return_pct": "{:.2f}%",
-                                "xirr_pct": "{:.2f}%",
-                                "weight": "{:.1%}",
-                            }),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
+                        try:
+                            st.dataframe(
+                                p[port_cols].style.format({
+                                    "abs_return_pct": "{:.2f}%",
+                                    "xirr_pct": "{:.2f}%",
+                                    "weight": "{:.1%}",
+                                }, na_rep="—"),
+                                use_container_width=True,
+                                hide_index=True,
+                                height=300,
+                            )
+                        except Exception:
+                            st.dataframe(p[port_cols], use_container_width=True, hide_index=True, height=300)
                         if "weight" in p.columns:
                             st.bar_chart(p.set_index("scheme_name")["weight"])
                         # Weighted average return
@@ -687,16 +734,38 @@ if st.session_state.results is not None:
 
         # Downloads
         st.subheader("Downloads")
+
         results_df = df.drop(columns=["transactions"], errors="ignore").copy()
         results_df.insert(0, "start_date", locked_start.strftime("%Y-%m-%d"))
         results_df.insert(1, "end_date", locked_end.strftime("%Y-%m-%d"))
         csv = results_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "📥 Download results (CSV)",
+            "📥 Download ranked results (CSV)",
             data=csv,
-            file_name=f"mf_results_{locked_start}_{locked_end}.csv",
+            file_name=f"mf_ranked_{locked_start}_{locked_end}.csv",
             mime="text/csv",
         )
+
+        # All portfolios (best / median / average / worst) in one file
+        portfolios = st.session_state.get("portfolios", {})
+        if portfolios:
+            all_ports = []
+            for sel, p in portfolios.items():
+                if p is not None and not p.empty:
+                    tmp = p.copy()
+                    tmp.insert(0, "portfolio_type", sel)
+                    tmp.insert(1, "start_date", locked_start.strftime("%Y-%m-%d"))
+                    tmp.insert(2, "end_date", locked_end.strftime("%Y-%m-%d"))
+                    all_ports.append(tmp)
+            if all_ports:
+                ports_df = pd.concat(all_ports, ignore_index=True)
+                ports_csv = ports_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "📥 Download all portfolios (Best/Median/Average/Worst)",
+                    data=ports_csv,
+                    file_name=f"mf_portfolios_{locked_start}_{locked_end}.csv",
+                    mime="text/csv",
+                )
 
         if "transactions" in df.columns and df["transactions"].notna().any():
             all_tx = []
@@ -723,6 +792,22 @@ if st.session_state.results is not None:
                     file_name=f"mf_transactions_{locked_start}_{locked_end}.csv",
                     mime="text/csv",
                 )
+
+        # Rebalancing transactions
+        rb_tx = st.session_state.get("rebalance_tx", [])
+        if rb_tx:
+            rb_df = pd.DataFrame(rb_tx)
+            rb_df.insert(0, "start_date", locked_start.strftime("%Y-%m-%d"))
+            rb_df.insert(1, "end_date", locked_end.strftime("%Y-%m-%d"))
+            rb_csv = rb_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Download rebalancing transactions (CSV)",
+                data=rb_csv,
+                file_name=f"mf_rebalance_{locked_start}_{locked_end}.csv",
+                mime="text/csv",
+            )
+            with st.expander("View rebalancing transactions"):
+                st.dataframe(rb_df, use_container_width=True, hide_index=True)
 
     if st.button("Clear results"):
         for k in ["results", "portfolio", "locked_dates", "run_params", "app_mode"]:

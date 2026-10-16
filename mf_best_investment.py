@@ -501,6 +501,133 @@ class MutualFundAnalyzer:
             result["transactions"] = transactions
         return result
 
+    def simulate_rebalancing(
+        self,
+        holdings: List[Dict],
+        nav_series: Dict[int, pd.DataFrame],
+        start: datetime,
+        end: datetime,
+        target_weights: Dict[int, float],
+        rebalance_freq: str = "quarterly",  # monthly, quarterly, semi_annually, annually
+        initial_amount: float = 100000,
+    ) -> Dict:
+        """
+        Simulate true rebalancing with actual unit redemptions and redeployments.
+        Returns portfolio value series + detailed rebalancing transactions.
+        """
+        # Generate rebalance dates
+        rebalance_dates = self.generate_sip_dates(start, end, rebalance_freq, 1)
+        if not rebalance_dates or rebalance_dates[-1] < end:
+            rebalance_dates.append(end)
+
+        # Initial allocation
+        units = {}
+        cashflows = []
+        transactions = []
+        total_invested = 0.0
+
+        for code, weight in target_weights.items():
+            amt = initial_amount * weight
+            df_nav = nav_series.get(code)
+            if df_nav is None or df_nav.empty:
+                continue
+            nav = self.get_nearest_nav(df_nav, start)
+            if not nav or nav == 0:
+                continue
+            u = amt / nav
+            units[code] = u
+            total_invested += amt
+            cashflows.append((start, -amt))
+            transactions.append({
+                "date": start.strftime("%Y-%m-%d"),
+                "type": "Initial Purchase",
+                "scheme_code": code,
+                "amount": -amt,
+                "nav": round(nav, 4),
+                "units": round(u, 6),
+                "note": "Initial allocation",
+            })
+
+        # Rebalance on each date
+        for rb_date in rebalance_dates:
+            if rb_date <= start:
+                continue
+            # Current value of each holding
+            current_values = {}
+            total_value = 0.0
+            for code in list(units.keys()):
+                df_nav = nav_series.get(code)
+                if df_nav is None:
+                    continue
+                nav = self.get_nearest_nav(df_nav, rb_date)
+                if nav and nav > 0:
+                    val = units[code] * nav
+                    current_values[code] = val
+                    total_value += val
+
+            if total_value <= 0:
+                continue
+
+            # Target values
+            for code, weight in target_weights.items():
+                target_val = total_value * weight
+                current_val = current_values.get(code, 0.0)
+                diff = target_val - current_val  # positive = buy more, negative = sell
+
+                df_nav = nav_series.get(code)
+                if df_nav is None:
+                    continue
+                nav = self.get_nearest_nav(df_nav, rb_date)
+                if not nav or nav == 0:
+                    continue
+
+                if abs(diff) < 1:  # ignore tiny differences
+                    continue
+
+                if diff < 0:
+                    # Redeem (sell)
+                    sell_units = abs(diff) / nav
+                    units[code] = max(0, units.get(code, 0) - sell_units)
+                    transactions.append({
+                        "date": rb_date.strftime("%Y-%m-%d"),
+                        "type": "Rebalance Redemption",
+                        "scheme_code": code,
+                        "amount": round(diff, 2),  # negative
+                        "nav": round(nav, 4),
+                        "units": round(-sell_units, 6),
+                        "note": "Sold to rebalance",
+                    })
+                else:
+                    # Deploy (buy)
+                    buy_units = diff / nav
+                    units[code] = units.get(code, 0) + buy_units
+                    transactions.append({
+                        "date": rb_date.strftime("%Y-%m-%d"),
+                        "type": "Rebalance Purchase",
+                        "scheme_code": code,
+                        "amount": round(-diff, 2),  # negative = cash out
+                        "nav": round(nav, 4),
+                        "units": round(buy_units, 6),
+                        "note": "Bought to rebalance",
+                    })
+
+        # Final value
+        final_value = 0.0
+        for code, u in units.items():
+            df_nav = nav_series.get(code)
+            if df_nav is None:
+                continue
+            nav = self.get_nearest_nav(df_nav, end)
+            if nav:
+                final_value += u * nav
+
+        return {
+            "transactions": transactions,
+            "final_value": final_value,
+            "total_invested": total_invested,
+            "units": units,
+        }
+
     def generate_equity_curve(
         self,
         df_nav: pd.DataFrame,
