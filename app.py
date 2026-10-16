@@ -605,79 +605,85 @@ if st.session_state.results is not None:
                             bench_curve = bench_curve.set_index("date").rename(columns={"value": "Nifty 50"})
                             equity = equity.join(bench_curve, how="outer").ffill()
 
-                    # Static chart
-                    st.line_chart(equity[["Portfolio", "Invested"] + ([c for c in equity.columns if c == "Nifty 50"])])
+                    # Static chart (always safe)
+                    chart_cols = [c for c in ["Portfolio", "Invested", "Nifty 50"] if c in equity.columns]
+                    if chart_cols:
+                        st.line_chart(equity[chart_cols])
 
-                    # Animated roller-coaster chart (Invested vs Current Value)
+                    # Animated roller-coaster chart (optional, guarded)
                     st.subheader("🎢 Portfolio Roller Coaster")
                     st.caption("Animated view of money invested vs current portfolio value over time.")
-
-                    anim_df = equity.reset_index().rename(columns={"index": "date"})
-                    if "date" not in anim_df.columns:
+                    try:
                         anim_df = equity.reset_index()
-                    anim_df = anim_df.sort_values("date")
+                        if "date" not in anim_df.columns and "index" in anim_df.columns:
+                            anim_df = anim_df.rename(columns={"index": "date"})
+                        anim_df = anim_df.sort_values("date").reset_index(drop=True)
 
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=anim_df["date"],
-                        y=anim_df["Invested"],
-                        mode="lines",
-                        name="Invested",
-                        line=dict(color="#888", dash="dash"),
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=anim_df["date"],
-                        y=anim_df["Portfolio"],
-                        mode="lines",
-                        name="Current Value",
-                        line=dict(color="#00cc96", width=3),
-                    ))
-                    if "Nifty 50" in anim_df.columns:
-                        fig.add_trace(go.Scatter(
-                            x=anim_df["date"],
-                            y=anim_df["Nifty 50"],
-                            mode="lines",
-                            name="Nifty 50",
-                            line=dict(color="#636EFA", dash="dot"),
-                        ))
+                        if len(anim_df) < 5:
+                            st.info("Not enough data points for animation.")
+                        else:
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=anim_df["date"], y=anim_df["Invested"],
+                                mode="lines", name="Invested",
+                                line=dict(color="#888", dash="dash"),
+                            ))
+                            fig.add_trace(go.Scatter(
+                                x=anim_df["date"], y=anim_df["Portfolio"],
+                                mode="lines", name="Current Value",
+                                line=dict(color="#00cc96", width=3),
+                            ))
+                            if "Nifty 50" in anim_df.columns:
+                                fig.add_trace(go.Scatter(
+                                    x=anim_df["date"], y=anim_df["Nifty 50"],
+                                    mode="lines", name="Nifty 50",
+                                    line=dict(color="#636EFA", dash="dot"),
+                                ))
 
-                    # Animation frames
-                    frames = []
-                    for i in range(10, len(anim_df), max(1, len(anim_df)//40)):
-                        frames.append(go.Frame(
-                            data=[
-                                go.Scatter(x=anim_df["date"][:i], y=anim_df["Invested"][:i]),
-                                go.Scatter(x=anim_df["date"][:i], y=anim_df["Portfolio"][:i]),
-                            ] + ([go.Scatter(x=anim_df["date"][:i], y=anim_df["Nifty 50"][:i])] if "Nifty 50" in anim_df.columns else []),
-                            traces=[0, 1] + ([2] if "Nifty 50" in anim_df.columns else []),
-                        ))
-                    fig.frames = frames
+                            # Limit frames to avoid browser crashes
+                            step = max(1, len(anim_df) // 30)
+                            frames = []
+                            for i in range(step, len(anim_df) + 1, step):
+                                frame_data = [
+                                    go.Scatter(x=anim_df["date"][:i], y=anim_df["Invested"][:i]),
+                                    go.Scatter(x=anim_df["date"][:i], y=anim_df["Portfolio"][:i]),
+                                ]
+                                traces = [0, 1]
+                                if "Nifty 50" in anim_df.columns:
+                                    frame_data.append(go.Scatter(x=anim_df["date"][:i], y=anim_df["Nifty 50"][:i]))
+                                    traces.append(2)
+                                frames.append(go.Frame(data=frame_data, traces=traces))
+                            fig.frames = frames
 
-                    fig.update_layout(
-                        title="Invested vs Current Portfolio Value",
-                        xaxis_title="Date",
-                        yaxis_title="Value (₹)",
-                        updatemenus=[{
-                            "type": "buttons",
-                            "buttons": [
-                                {
-                                    "label": "▶ Play Roller Coaster",
-                                    "method": "animate",
-                                    "args": [None, {"frame": {"duration": 80, "redraw": True}, "fromcurrent": True}],
-                                },
-                                {
-                                    "label": "Pause",
-                                    "method": "animate",
-                                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
-                                },
-                            ],
-                        }],
-                        height=500,
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                            fig.update_layout(
+                                title="Invested vs Current Portfolio Value",
+                                xaxis_title="Date",
+                                yaxis_title="Value (₹)",
+                                updatemenus=[{
+                                    "type": "buttons",
+                                    "buttons": [
+                                        {
+                                            "label": "▶ Play",
+                                            "method": "animate",
+                                            "args": [None, {"frame": {"duration": 100, "redraw": True}, "fromcurrent": True}],
+                                        },
+                                        {
+                                            "label": "Pause",
+                                            "method": "animate",
+                                            "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}],
+                                        },
+                                    ],
+                                }],
+                                height=480,
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.warning(f"Could not render animated chart ({type(e).__name__}). Static chart above is still available.")
 
                     with st.expander("Show individual fund curves"):
-                        st.line_chart(equity.drop(columns=["Portfolio", "Invested"], errors="ignore"))
+                        other_cols = [c for c in equity.columns if c not in ("Portfolio", "Invested")]
+                        if other_cols:
+                            st.line_chart(equity[other_cols])
 
         # Downloads
         st.subheader("Downloads")
