@@ -4,6 +4,17 @@ from datetime import date, datetime
 import plotly.graph_objects as go
 from mf_best_investment import MutualFundAnalyzer, CATEGORY_KEYWORDS, CATEGORY_GROUPS
 
+# Cached wrappers to reduce API calls
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_search_schemes(query: str):
+    analyzer = MutualFundAnalyzer(rate_limit_delay=0.1)
+    return analyzer.search_schemes(query)
+
+@st.cache_data(ttl=86400, show_spinner=False)  # 24 hours for NAV data
+def cached_get_scheme_nav(scheme_code: int, start_date: str, end_date: str):
+    analyzer = MutualFundAnalyzer(rate_limit_delay=0.1)
+    return analyzer.get_scheme_meta_and_nav(scheme_code, start_date, end_date)
+
 st.set_page_config(
     page_title="Indian Mutual Fund Optimiser",
     page_icon="📈",
@@ -151,6 +162,10 @@ with st.sidebar:
 
         collect_tx = st.checkbox("Also collect transaction history (SIP only)", value=True)
         run = st.button("🚀 Run Optimiser", type="primary", use_container_width=True)
+        if st.button("🗑️ Clear cache", use_container_width=True):
+            st.cache_data.clear()
+            st.success("Cache cleared")
+            st.rerun()
     else:
         # Custom portfolio mode
         st.subheader("Your holdings")
@@ -167,8 +182,7 @@ with st.sidebar:
             selected_scheme = None
             if search_q and len(search_q) >= 3:
                 with st.spinner("Searching..."):
-                    analyzer_search = MutualFundAnalyzer(rate_limit_delay=0.15)
-                    results = analyzer_search.search_schemes(search_q)
+                    results = cached_search_schemes(search_q)
                 if results:
                     options = {
                         f"{r.get('schemeName', '')} | {r.get('fund_house', '')} | {r.get('scheme_category', '')} | ISIN: {r.get('isin_growth', 'N/A')} | NAV: {r.get('latest_nav', '—')} ({r.get('latest_date', '')}) (Code: {r.get('schemeCode')})": r
@@ -244,10 +258,10 @@ if run:
             # Lock dates
             locked_start = start_date
             locked_end = end_date
-            probe = analyzer.search_schemes("Large Cap Direct Growth")
+            probe = cached_search_schemes("Large Cap Direct Growth")
             if probe:
                 probe_code = probe[0]["schemeCode"]
-                probe_data = analyzer.get_scheme_meta_and_nav(
+                probe_data = cached_get_scheme_nav(
                     probe_code,
                     (start_date - pd.Timedelta(days=10)).strftime("%Y-%m-%d"),
                     (end_date + pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
@@ -294,10 +308,10 @@ if run:
 
             locked_start = start_date
             locked_end = end_date
-            probe = analyzer.search_schemes("Large Cap Direct Growth")
+            probe = cached_search_schemes("Large Cap Direct Growth")
             if probe:
                 probe_code = probe[0]["schemeCode"]
-                probe_data = analyzer.get_scheme_meta_and_nav(
+                probe_data = cached_get_scheme_nav(
                     probe_code,
                     (start_date - pd.Timedelta(days=10)).strftime("%Y-%m-%d"),
                     (end_date + pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
