@@ -1,8 +1,21 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
-import plotly.graph_objects as go
-from mf_best_investment import MutualFundAnalyzer, CATEGORY_KEYWORDS, CATEGORY_GROUPS
+from datetime import date, datetime, timedelta
+import pandas as pd
+# ... existing imports
+
+def get_last_working_day(ref: date = None) -> date:
+    """Approximate last working day (skip weekends)."""
+    d = ref or date.today()
+    while d.weekday() >= 5:  # Sat=5, Sun=6
+        d -= timedelta(days=1)
+    return d
+
+def get_five_years_before(end: date) -> date:
+    try:
+        return end.replace(year=end.year - 5)
+    except ValueError:
+        return end.replace(year=end.year - 5, day=28)
 
 # Cached wrappers to reduce API calls
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -46,26 +59,28 @@ with st.sidebar:
     else:
         mode = "custom"
 
+    default_end = get_last_working_day()
+    default_start = get_five_years_before(default_end)
+
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("Start date", value=date(2023, 1, 1), key="start_main")
+        start_date = st.date_input("Start date", value=default_start, key="start_main")
     with col2:
-        end_date = st.date_input("End date", value=date(2024, 12, 31), key="end_main")
+        end_date = st.date_input("End date", value=default_end, key="end_main")
 
     if app_mode == "Best For & Later (Out-of-Sample)":
-        st.subheader("Selection period (choose the best portfolio)")
+        st.subheader("1. Selection period (optimiser picks the best mix)")
         c1, c2 = st.columns(2)
         with c1:
-            sel_start = st.date_input("Selection start", value=date(2025, 1, 1), key="sel_start")
+            sel_start = st.date_input("Selection start", value=default_start, key="sel_start")
         with c2:
-            sel_end = st.date_input("Selection end", value=date(2025, 12, 31), key="sel_end")
-        st.subheader("Later period (out-of-sample)")
+            sel_end = st.date_input("Selection end", value=default_end, key="sel_end")
+        st.subheader("2. Later period (investor holds the best pick)")
         c3, c4 = st.columns(2)
         with c3:
-            later_start = st.date_input("Later start", value=date(2026, 1, 1), key="later_start")
+            later_start = st.date_input("Later start", value=default_end + timedelta(days=1), key="later_start")
         with c4:
-            later_end = st.date_input("Later end", value=date.today(), key="later_end")
-        # Override main dates for selection
+            later_end = st.date_input("Later end", value=get_last_working_day(), key="later_end")
         start_date = sel_start
         end_date = sel_end
 
@@ -523,8 +538,8 @@ if st.session_state.results is not None:
                 oos = st.session_state.oos_params
                 later_start = oos["later_start"]
                 later_end = oos["later_end"]
-                st.subheader(f"Out-of-Sample Performance ({later_start} → {later_end})")
-                st.caption("Same funds and weights chosen on the selection period, evaluated on the later period.")
+                st.subheader(f"2. Out-of-Sample: Investor holds the best pick ({later_start} → {later_end})")
+                st.caption("The best portfolio recommended for the selection period is assumed to be held by the investor in the later period.")
 
                 best_port = portfolios.get("best")
                 if best_port is not None and not best_port.empty:
