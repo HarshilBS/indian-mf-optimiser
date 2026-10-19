@@ -1,8 +1,19 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
-import pandas as pd
-# ... existing imports
+import plotly.graph_objects as go
+from mf_best_investment import MutualFundAnalyzer, CATEGORY_KEYWORDS, CATEGORY_GROUPS
+
+# Fallback in case import fails on deployment
+if not isinstance(CATEGORY_GROUPS, dict) or not CATEGORY_GROUPS:
+    CATEGORY_GROUPS = {
+        "Equity": ["large_cap", "mid_cap", "small_cap", "large_mid", "flexi_cap", "multi_cap", "focused", "value_contra", "dividend_yield", "elss", "sectoral_thematic", "index"],
+        "Debt": ["overnight", "liquid", "ultra_short", "low_duration", "money_market", "short_duration", "medium_duration", "medium_to_long", "long_duration", "dynamic_bond", "corporate_bond", "credit_risk", "banking_psu", "gilt", "gilt_10y", "floater"],
+        "Hybrid": ["conservative_hybrid", "balanced_hybrid", "aggressive_hybrid", "balanced_advantage", "multi_asset", "arbitrage", "equity_savings"],
+        "FoF / Others": ["fof", "multi_asset_fof", "solution_oriented"],
+    }
+
+# Cached wrappers to reduce API calls
 
 def get_last_working_day(ref: date = None) -> date:
     """Approximate last working day (skip weekends)."""
