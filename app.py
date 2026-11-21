@@ -3,7 +3,12 @@ import pandas as pd
 import numpy as np
 from mftool import Mftool
 from datetime import datetime, timedelta, date
-import pulp
+try:
+    import pulp
+    PULP_AVAILABLE = True
+except ImportError:
+    PULP_AVAILABLE = False
+    pulp = None
 import plotly.express as px
 import plotly.graph_objects as go
 import warnings
@@ -238,7 +243,7 @@ if app_mode == "Find Best Funds (Optimiser)":
 
         # Optimisation
         st.subheader("🎯 Optimised Selection")
-        if use_ilp and len(res_df) >= 2:
+        if use_ilp and PULP_AVAILABLE and len(res_df) >= 2:
             prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
             codes = res_df["Code"].tolist()
             score_map = dict(zip(res_df["Code"], res_df[sort_col]))
@@ -276,6 +281,8 @@ if app_mode == "Find Best Funds (Optimiser)":
                 st.warning("Optimiser could not find a feasible solution. Showing top ranked funds.")
                 st.dataframe(res_df.head(max_funds))
         else:
+            if use_ilp and not PULP_AVAILABLE:
+                st.warning("PuLP is not available in this environment. Showing top ranked funds instead.")
             st.info("Top funds by selected metric:")
             st.dataframe(res_df.head(max_funds))
 
