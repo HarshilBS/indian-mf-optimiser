@@ -14,6 +14,22 @@ import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
 
+def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight):
+    """Simple constraint-respecting allocation (no external solver)."""
+    if res_df.empty:
+        return pd.DataFrame()
+    top = res_df.head(max_funds).copy()
+    n = len(top)
+    if n == 0:
+        return pd.DataFrame()
+    base = 1.0 / n
+    weights = [min(max(base, min_weight), max_weight) for _ in range(n)]
+    s = sum(weights)
+    if s > 0:
+        weights = [w / s for w in weights]
+    top["Weight %"] = [round(w * 100, 2) for w in weights]
+    return top[["Scheme Name", "Category", "Weight %", "CAGR %", "Sharpe"]].sort_values("Weight %", ascending=False)
+
 st.set_page_config(
     page_title="Indian Mutual Fund Optimiser",
     page_icon="📈",
@@ -126,7 +142,7 @@ max_weight = st.sidebar.slider("Max exposure per fund (%)", 10, 100, 40) / 100
 min_weight = st.sidebar.slider("Min exposure per fund (%)", 0, 50, 5) / 100
 
 metric = st.sidebar.selectbox("Rank / Optimise by", ["CAGR", "Sharpe Ratio", "Total Return", "Sortino Ratio"])
-use_ilp = st.sidebar.checkbox("Use ILP optimisation for allocation", value=True)
+use_ilp = st.sidebar.checkbox("Use ILP optimisation for allocation (experimental)", value=False)
 
 if st.sidebar.button("🗑️ Clear cache"):
     st.cache_data.clear()
@@ -205,10 +221,9 @@ if app_mode == "Find Best Funds (Optimiser)":
                 else:
                     vol = sharpe = sortino = max_dd = 0.0
 
-                # Robust scheme name lookup (itertuples renames columns with spaces)
+                # Robust scheme name lookup
                 scheme_name = getattr(row, "Scheme_Name", None) or getattr(row, "SchemeName", None) or ""
                 if not scheme_name:
-                    # fallback via original dataframe
                     try:
                         scheme_name = to_analyse.iloc[i]["Scheme Name"]
                     except Exception:
@@ -250,54 +265,53 @@ if app_mode == "Find Best Funds (Optimiser)":
         csv = res_df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download ranked results", csv, "mf_ranked.csv", "text/csv")
 
-        # Optimisation
-        st.subheader("🎯 Optimised Selection")
-        if use_ilp and PULP_AVAILABLE and len(res_df) >= 2:
-            try:
-                prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
-                codes = res_df["Code"].tolist()
-                score_map = dict(zip(res_df["Code"], res_df[sort_col]))
-
-                w = pulp.LpVariable.dicts("w", codes, lowBound=0, upBound=max_weight)
-                sel = pulp.LpVariable.dicts("sel", codes, cat="Binary")
-
-                prob += pulp.lpSum(score_map[c] * w[c] for c in codes)
-                prob += pulp.lpSum(w[c] for c in codes) == 1.0
-                prob += pulp.lpSum(sel[c] for c in codes) <= max_funds
-                for c in codes:
-                    prob += w[c] <= max_weight * sel[c]
-                    prob += w[c] >= min_weight * sel[c]
-
-                status_code = prob.solve(pulp.PULP_CBC_CMD(msg=0))
-                if pulp.LpStatus[status_code] == "Optimal":
-                    alloc = []
-                    for c in codes:
-                        wt = pulp.value(w[c]) or 0
-                        if wt > 0.005:
-                            r = res_df[res_df["Code"] == c].iloc[0]
-                            alloc.append({
-                                "Scheme Name": r["Scheme Name"],
-                                "Category": r["Category"],
-                                "Weight %": round(wt * 100, 2),
-                                "CAGR %": r["CAGR %"],
-                                "Sharpe": r["Sharpe"],
-                            })
-                    alloc_df = pd.DataFrame(alloc).sort_values("Weight %", ascending=False)
-                    st.success("ILP-optimised allocation (maximises chosen metric under constraints):")
-                    st.dataframe(alloc_df, use_container_width=True)
-                    fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title="Recommended Allocation")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("Optimiser could not find a feasible solution. Showing top ranked funds.")
-                    st.dataframe(res_df.head(max_funds))
-            except Exception as e:
-                st.warning(f"ILP optimiser failed ({type(e).__name__}). Showing top ranked funds instead.")
-                st.dataframe(res_df.head(max_funds))
+        # Recommended allocation (greedy – always works)
+        st.subheader("🎯 Recommended Allocation")
+        alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight)
+        if not alloc_df.empty:
+            st.success(f"Top {len(alloc_df)} funds by {metric} (weights respect max/min exposure):")
+            st.dataframe(alloc_df, use_container_width=True)
+            fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title="Recommended Allocation")
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            if use_ilp and not PULP_AVAILABLE:
-                st.warning("PuLP is not available in this environment. Showing top ranked funds instead.")
             st.info("Top funds by selected metric:")
             st.dataframe(res_df.head(max_funds))
+
+        # Optional experimental ILP
+        if use_ilp and PULP_AVAILABLE:
+            with st.expander("Experimental ILP optimiser (may fail on Streamlit Cloud)"):
+                try:
+                    prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
+                    codes = res_df["Code"].tolist()
+                    score_map = dict(zip(res_df["Code"], res_df[sort_col]))
+                    w = pulp.LpVariable.dicts("w", codes, lowBound=0, upBound=max_weight)
+                    sel = pulp.LpVariable.dicts("sel", codes, cat="Binary")
+                    prob += pulp.lpSum(score_map[c] * w[c] for c in codes)
+                    prob += pulp.lpSum(w[c] for c in codes) == 1.0
+                    prob += pulp.lpSum(sel[c] for c in codes) <= max_funds
+                    for c in codes:
+                        prob += w[c] <= max_weight * sel[c]
+                        prob += w[c] >= min_weight * sel[c]
+                    status_code = prob.solve(pulp.PULP_CBC_CMD(msg=0))
+                    if pulp.LpStatus[status_code] == "Optimal":
+                        alloc = []
+                        for c in codes:
+                            wt = pulp.value(w[c]) or 0
+                            if wt > 0.005:
+                                r = res_df[res_df["Code"] == c].iloc[0]
+                                alloc.append({
+                                    "Scheme Name": r["Scheme Name"],
+                                    "Category": r["Category"],
+                                    "Weight %": round(wt * 100, 2),
+                                    "CAGR %": r["CAGR %"],
+                                    "Sharpe": r["Sharpe"],
+                                })
+                        if alloc:
+                            st.dataframe(pd.DataFrame(alloc).sort_values("Weight %", ascending=False), use_container_width=True)
+                    else:
+                        st.info("ILP did not find a feasible solution.")
+                except Exception as e:
+                    st.info(f"ILP skipped ({type(e).__name__}).")
 
         # Chart top 5
         st.subheader("📈 Cumulative Growth of Top 5")
