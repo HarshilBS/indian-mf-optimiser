@@ -253,41 +253,45 @@ if app_mode == "Find Best Funds (Optimiser)":
         # Optimisation
         st.subheader("🎯 Optimised Selection")
         if use_ilp and PULP_AVAILABLE and len(res_df) >= 2:
-            prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
-            codes = res_df["Code"].tolist()
-            score_map = dict(zip(res_df["Code"], res_df[sort_col]))
+            try:
+                prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
+                codes = res_df["Code"].tolist()
+                score_map = dict(zip(res_df["Code"], res_df[sort_col]))
 
-            w = pulp.LpVariable.dicts("w", codes, lowBound=0, upBound=max_weight)
-            sel = pulp.LpVariable.dicts("sel", codes, cat="Binary")
+                w = pulp.LpVariable.dicts("w", codes, lowBound=0, upBound=max_weight)
+                sel = pulp.LpVariable.dicts("sel", codes, cat="Binary")
 
-            prob += pulp.lpSum(score_map[c] * w[c] for c in codes)
-            prob += pulp.lpSum(w[c] for c in codes) == 1.0
-            prob += pulp.lpSum(sel[c] for c in codes) <= max_funds
-            for c in codes:
-                prob += w[c] <= max_weight * sel[c]
-                prob += w[c] >= min_weight * sel[c]
-
-            status_code = prob.solve(pulp.PULP_CBC_CMD(msg=0))
-            if pulp.LpStatus[status_code] == "Optimal":
-                alloc = []
+                prob += pulp.lpSum(score_map[c] * w[c] for c in codes)
+                prob += pulp.lpSum(w[c] for c in codes) == 1.0
+                prob += pulp.lpSum(sel[c] for c in codes) <= max_funds
                 for c in codes:
-                    wt = pulp.value(w[c]) or 0
-                    if wt > 0.005:
-                        r = res_df[res_df["Code"] == c].iloc[0]
-                        alloc.append({
-                            "Scheme Name": r["Scheme Name"],
-                            "Category": r["Category"],
-                            "Weight %": round(wt * 100, 2),
-                            "CAGR %": r["CAGR %"],
-                            "Sharpe": r["Sharpe"],
-                        })
-                alloc_df = pd.DataFrame(alloc).sort_values("Weight %", ascending=False)
-                st.success("ILP-optimised allocation (maximises chosen metric under constraints):")
-                st.dataframe(alloc_df, use_container_width=True)
-                fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title="Recommended Allocation")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Optimiser could not find a feasible solution. Showing top ranked funds.")
+                    prob += w[c] <= max_weight * sel[c]
+                    prob += w[c] >= min_weight * sel[c]
+
+                status_code = prob.solve(pulp.PULP_CBC_CMD(msg=0))
+                if pulp.LpStatus[status_code] == "Optimal":
+                    alloc = []
+                    for c in codes:
+                        wt = pulp.value(w[c]) or 0
+                        if wt > 0.005:
+                            r = res_df[res_df["Code"] == c].iloc[0]
+                            alloc.append({
+                                "Scheme Name": r["Scheme Name"],
+                                "Category": r["Category"],
+                                "Weight %": round(wt * 100, 2),
+                                "CAGR %": r["CAGR %"],
+                                "Sharpe": r["Sharpe"],
+                            })
+                    alloc_df = pd.DataFrame(alloc).sort_values("Weight %", ascending=False)
+                    st.success("ILP-optimised allocation (maximises chosen metric under constraints):")
+                    st.dataframe(alloc_df, use_container_width=True)
+                    fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title="Recommended Allocation")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Optimiser could not find a feasible solution. Showing top ranked funds.")
+                    st.dataframe(res_df.head(max_funds))
+            except Exception as e:
+                st.warning(f"ILP optimiser failed ({type(e).__name__}). Showing top ranked funds instead.")
                 st.dataframe(res_df.head(max_funds))
         else:
             if use_ilp and not PULP_AVAILABLE:
