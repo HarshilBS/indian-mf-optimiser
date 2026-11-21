@@ -14,21 +14,45 @@ import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
 
-def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight):
-    """Simple constraint-respecting allocation (no external solver)."""
+def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight=0.40):
+    """Select top funds while respecting per-fund and per-AMC caps."""
     if res_df.empty:
         return pd.DataFrame()
-    top = res_df.head(max_funds).copy()
-    n = len(top)
-    if n == 0:
+    selected = []
+    amc_used = {}
+    for _, row in res_df.iterrows():
+        if len(selected) >= max_funds:
+            break
+        amc = str(row.get("AMC", "Unknown")).strip() or "Unknown"
+        current_amc = amc_used.get(amc, 0.0)
+        tentative = min(max_weight, max(min_weight, 1.0 / max_funds))
+        if current_amc + tentative > max_amc_weight + 1e-6:
+            continue
+        selected.append(row)
+        amc_used[amc] = current_amc + tentative
+    if not selected:
         return pd.DataFrame()
+    top = pd.DataFrame(selected)
+    n = len(top)
     base = 1.0 / n
-    weights = [min(max(base, min_weight), max_weight) for _ in range(n)]
+    weights = []
+    amc_final = {}
+    for _, row in top.iterrows():
+        amc = str(row.get("AMC", "Unknown")).strip() or "Unknown"
+        w = min(max(base, min_weight), max_weight)
+        already = amc_final.get(amc, 0.0)
+        room = max(0.0, max_amc_weight - already)
+        w = min(w, room)
+        weights.append(w)
+        amc_final[amc] = already + w
     s = sum(weights)
     if s > 0:
         weights = [w / s for w in weights]
+    top = top.copy()
     top["Weight %"] = [round(w * 100, 2) for w in weights]
-    return top[["Scheme Name", "Category", "Weight %", "CAGR %", "Sharpe"]].sort_values("Weight %", ascending=False)
+    top["AMC"] = top.get("AMC", "Unknown")
+    cols = ["Scheme Name", "AMC", "Category", "Weight %", "CAGR %", "Sharpe"]
+    return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
 st.set_page_config(
     page_title="Indian Mutual Fund Optimiser",
@@ -140,6 +164,7 @@ st.sidebar.subheader("Portfolio constraints")
 max_funds = st.sidebar.slider("Max total funds", 1, 12, 5)
 max_weight = st.sidebar.slider("Max exposure per fund (%)", 10, 100, 40) / 100
 min_weight = st.sidebar.slider("Min exposure per fund (%)", 0, 50, 5) / 100
+max_amc_weight = st.sidebar.slider("Max allocation per AMC (%)", 10, 100, 40) / 100
 
 metric = st.sidebar.selectbox("Rank / Optimise by", ["CAGR", "Sharpe Ratio", "Total Return", "Sortino Ratio"])
 use_ilp = st.sidebar.checkbox("Use ILP optimisation for allocation (experimental)", value=False)
@@ -265,11 +290,11 @@ if app_mode == "Find Best Funds (Optimiser)":
         csv = res_df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download ranked results", csv, "mf_ranked.csv", "text/csv")
 
-        # Recommended allocation (greedy – always works)
+        # Recommended allocation (greedy with AMC cap)
         st.subheader("🎯 Recommended Allocation")
-        alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight)
+        alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight)
         if not alloc_df.empty:
-            st.success(f"Top {len(alloc_df)} funds by {metric} (weights respect max/min exposure):")
+            st.success(f"Top {len(alloc_df)} funds by {metric} (per-fund + max {int(max_amc_weight*100)}% per AMC):")
             st.dataframe(alloc_df, use_container_width=True)
             fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title="Recommended Allocation")
             st.plotly_chart(fig, use_container_width=True)
