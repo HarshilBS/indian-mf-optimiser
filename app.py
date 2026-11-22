@@ -26,10 +26,8 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
         start = max(0, mid - max_funds // 2)
         df = df.iloc[start:start + max_funds * 2].reset_index(drop=True)
     elif selection == "average":
-        # take a spread across the ranking
         step = max(1, len(df) // (max_funds * 2))
         df = df.iloc[::step].reset_index(drop=True)
-    # else best: keep sorted order
 
     selected = []
     amc_used = {}
@@ -180,12 +178,13 @@ min_weight = st.sidebar.slider("Min exposure per fund (%)", 0, 50, 5) / 100
 max_amc_weight = st.sidebar.slider("Max allocation per AMC (%)", 10, 100, 40) / 100
 
 metric = st.sidebar.selectbox("Rank / Optimise by", ["CAGR", "Sharpe Ratio", "Total Return", "Sortino Ratio"])
-portfolio_selection = st.sidebar.selectbox(
-    "Portfolio selection",
+portfolio_selections = st.sidebar.multiselect(
+    "Portfolios to compare (side by side)",
     ["Best", "Median", "Average", "Worst"],
-    help="Best = top ranked, Worst = bottom ranked, Median = middle of ranking, Average = spread across ranking"
+    default=["Best", "Median"],
+    help="Select one or more. They will be shown next to each other."
 )
-use_ilp = st.sidebar.checkbox("Use PuLP optimiser (with AMC constraint)", value=True)
+use_ilp = st.sidebar.checkbox("Use PuLP optimiser for Best portfolio", value=True)
 
 if st.sidebar.button("🗑️ Clear cache"):
     st.cache_data.clear()
@@ -248,7 +247,6 @@ if app_mode == "Find Best Funds (Optimiser)":
                 total_ret = (end_nav / start_nav - 1) * 100
                 cagr = ((end_nav / start_nav) ** (1 / years) - 1) * 100
 
-                # Risk metrics
                 period = hist[(hist["date"] >= actual_start) & (hist["date"] <= actual_end)].copy()
                 period["ret"] = period["nav"].pct_change()
                 rets = period["ret"].dropna()
@@ -264,7 +262,6 @@ if app_mode == "Find Best Funds (Optimiser)":
                 else:
                     vol = sharpe = sortino = max_dd = 0.0
 
-                # Robust scheme name lookup
                 scheme_name = getattr(row, "Scheme_Name", None) or getattr(row, "SchemeName", None) or ""
                 if not scheme_name:
                     try:
@@ -308,76 +305,82 @@ if app_mode == "Find Best Funds (Optimiser)":
         csv = res_df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download ranked results", csv, "mf_ranked.csv", "text/csv")
 
-        # Portfolio selection label
-        sel_map = {"Best": "best", "Median": "median", "Average": "average", "Worst": "worst"}
-        sel_key = sel_map.get(portfolio_selection, "best")
-
-        # Recommended allocation – try PuLP first (with AMC cap), fall back to greedy
-        st.subheader(f"🎯 {portfolio_selection} Portfolio Allocation")
-        alloc_df = None
-
-        if use_ilp and PULP_AVAILABLE and sel_key == "best":
-            try:
-                prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
-                codes = list(res_df["Code"])
-                score_map = dict(zip(res_df["Code"], res_df[sort_col]))
-                amc_series = res_df["AMC"] if "AMC" in res_df.columns else pd.Series(["Unknown"] * len(res_df))
-                amc_map = dict(zip(codes, amc_series))
-
-                w = pulp.LpVariable.dicts("w", codes, lowBound=0, upBound=max_weight)
-                sel = pulp.LpVariable.dicts("sel", codes, cat="Binary")
-
-                prob += pulp.lpSum(float(score_map[c]) * w[c] for c in codes)
-                prob += pulp.lpSum(w[c] for c in codes) == 1.0
-                prob += pulp.lpSum(sel[c] for c in codes) <= int(max_funds)
-                for c in codes:
-                    prob += w[c] <= max_weight * sel[c]
-                    prob += w[c] >= min_weight * sel[c]
-
-                for amc in set(str(a) for a in amc_map.values()):
-                    codes_in = [c for c in codes if str(amc_map.get(c, "")) == amc]
-                    if codes_in:
-                        prob += pulp.lpSum(w[c] for c in codes_in) <= max_amc_weight
-
-                try:
-                    status_code = prob.solve(pulp.PULP_CBC_CMD(msg=False))
-                except Exception:
-                    status_code = prob.solve()
-
-                if pulp.LpStatus[status_code] == "Optimal":
-                    rows = []
-                    for c in codes:
-                        wt = pulp.value(w[c]) or 0.0
-                        if wt > 0.005:
-                            r = res_df[res_df["Code"] == c].iloc[0]
-                            rows.append({
-                                "Scheme Name": r["Scheme Name"],
-                                "AMC": r.get("AMC", ""),
-                                "Category": r.get("Category", ""),
-                                "Weight %": round(wt * 100, 2),
-                                "CAGR %": r["CAGR %"],
-                                "Sharpe": r["Sharpe"],
-                            })
-                    if rows:
-                        alloc_df = pd.DataFrame(rows).sort_values("Weight %", ascending=False)
-                        st.success(f"PuLP ILP solution for {portfolio_selection} (max {int(max_amc_weight*100)}% per AMC)")
-            except Exception as e:
-                st.warning(f"PuLP failed ({type(e).__name__}: {str(e)[:150]}). Falling back to greedy.")
-
-        if alloc_df is None or alloc_df.empty:
-            alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight, selection=sel_key)
-            if not alloc_df.empty:
-                st.info(f"{portfolio_selection} portfolio (per-fund + max {int(max_amc_weight*100)}% per AMC)")
-
-        if alloc_df is not None and not alloc_df.empty:
-            st.dataframe(alloc_df, use_container_width=True)
-            fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title=f"{portfolio_selection} Allocation")
-            st.plotly_chart(fig, use_container_width=True)
+        # Side-by-side portfolios
+        if not portfolio_selections:
+            st.warning("Select at least one portfolio type in the sidebar.")
         else:
-            st.info("Top funds by selected metric:")
-            st.dataframe(res_df.head(max_funds))
+            st.subheader("🎯 Portfolio Comparison (side by side)")
+            sel_map = {"Best": "best", "Median": "median", "Average": "average", "Worst": "worst"}
+            cols = st.columns(len(portfolio_selections))
 
-        # Chart top 5 – Growth of ₹100 (robust)
+            for idx, label in enumerate(portfolio_selections):
+                with cols[idx]:
+                    st.markdown(f"**{label}**")
+                    sel_key = sel_map.get(label, "best")
+                    alloc_df = None
+
+                    if use_ilp and PULP_AVAILABLE and sel_key == "best":
+                        try:
+                            prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
+                            codes = list(res_df["Code"])
+                            score_map = dict(zip(res_df["Code"], res_df[sort_col]))
+                            amc_series = res_df["AMC"] if "AMC" in res_df.columns else pd.Series(["Unknown"] * len(res_df))
+                            amc_map = dict(zip(codes, amc_series))
+
+                            w = pulp.LpVariable.dicts("w", codes, lowBound=0, upBound=max_weight)
+                            sel = pulp.LpVariable.dicts("sel", codes, cat="Binary")
+
+                            prob += pulp.lpSum(float(score_map[c]) * w[c] for c in codes)
+                            prob += pulp.lpSum(w[c] for c in codes) == 1.0
+                            prob += pulp.lpSum(sel[c] for c in codes) <= int(max_funds)
+                            for c in codes:
+                                prob += w[c] <= max_weight * sel[c]
+                                prob += w[c] >= min_weight * sel[c]
+
+                            for amc in set(str(a) for a in amc_map.values()):
+                                codes_in = [c for c in codes if str(amc_map.get(c, "")) == amc]
+                                if codes_in:
+                                    prob += pulp.lpSum(w[c] for c in codes_in) <= max_amc_weight
+
+                            try:
+                                status_code = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+                            except Exception:
+                                status_code = prob.solve()
+
+                            if pulp.LpStatus[status_code] == "Optimal":
+                                rows = []
+                                for c in codes:
+                                    wt = pulp.value(w[c]) or 0.0
+                                    if wt > 0.005:
+                                        r = res_df[res_df["Code"] == c].iloc[0]
+                                        rows.append({
+                                            "Scheme Name": r["Scheme Name"],
+                                            "AMC": r.get("AMC", ""),
+                                            "Category": r.get("Category", ""),
+                                            "Weight %": round(wt * 100, 2),
+                                            "CAGR %": r["CAGR %"],
+                                            "Sharpe": r["Sharpe"],
+                                        })
+                                if rows:
+                                    alloc_df = pd.DataFrame(rows).sort_values("Weight %", ascending=False)
+                                    st.caption("PuLP ILP")
+                        except Exception:
+                            pass
+
+                    if alloc_df is None or alloc_df.empty:
+                        alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight, selection=sel_key)
+                        if not alloc_df.empty:
+                            st.caption("Greedy")
+
+                    if alloc_df is not None and not alloc_df.empty:
+                        st.dataframe(alloc_df, use_container_width=True, height=280)
+                        fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title=label)
+                        fig.update_layout(height=320, margin=dict(t=40, b=20, l=20, r=20))
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No allocation")
+
+        # Chart top 5
         st.subheader("📈 Cumulative Growth of Top 5")
         fig = go.Figure()
         traces_added = 0
