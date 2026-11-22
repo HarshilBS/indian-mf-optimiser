@@ -65,21 +65,36 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
     return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
 def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
-    """SIP calculation with unit allocation and instalment-wise returns vs latest NAV."""
+    """SIP calculation. Starts only from the fund's first available NAV (inception).
+    No phantom instalments before the fund existed. Each instalment uses a unique date."""
     if hist_df.empty:
         return None
     hist = hist_df.copy()
     hist["date"] = pd.to_datetime(hist["date"])
     hist = hist.sort_values("date").reset_index(drop=True)
 
-    sip_rows = []
-    current = pd.Timestamp(start_date).replace(day=min(sip_day, 28))
+    first_available = hist["date"].iloc[0]
     end_ts = pd.Timestamp(end_date)
+    # Effective start = later of user start and fund inception
+    effective_start = max(pd.Timestamp(start_date), first_available)
+
+    sip_rows = []
+    used_dates = set()
+    current = effective_start.replace(day=min(sip_day, 28))
+    # If the day-adjusted current is before first available, jump to first available month
+    if current < first_available:
+        current = first_available.replace(day=min(sip_day, 28))
+        if current < first_available:
+            current = current + pd.DateOffset(months=1)
+
     while current <= end_ts:
-        candidates = hist[hist["date"] >= current]
+        candidates = hist[(hist["date"] >= current) & (~hist["date"].isin(used_dates))]
         if not candidates.empty:
-            sip_rows.append(candidates.iloc[0])
+            chosen = candidates.iloc[0]
+            sip_rows.append(chosen)
+            used_dates.add(chosen["date"])
         current = current + pd.DateOffset(months=1)
+
     if len(sip_rows) < 1:
         return None
 
@@ -143,6 +158,7 @@ def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
         "xirr_pct": xirr_pct,
         "absolute_return_pct": abs_total,
         "instalments": pd.DataFrame(instalments),
+        "effective_start": effective_start.strftime("%d-%b-%Y"),
     }
 
 st.set_page_config(
@@ -279,9 +295,6 @@ elif option_filter == "IDCW only":
 
 st.sidebar.info(f"Matching schemes: {len(filtered)}")
 
-# ============================================================
-# MODE: Fund Lookup & SIP
-# ============================================================
 if app_mode == "Fund Lookup & SIP":
     st.subheader("🔍 Fund Lookup — Full NAV History & SIP Return")
 
@@ -343,7 +356,10 @@ if app_mode == "Fund Lookup & SIP":
 
         st.subheader("💰 SIP Return + Unit Allocation")
         period_hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))]
-        sip_res = compute_sip_return(period_hist, sip_amount, sip_day, start_date, end_date)
+        # If period is empty because start is before inception, use full hist from inception
+        if period_hist.empty:
+            period_hist = hist[hist["date"] <= pd.Timestamp(end_date)]
+        sip_res = compute_sip_return(period_hist if not period_hist.empty else hist, sip_amount, sip_day, start_date, end_date)
         if sip_res:
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Months", sip_res["months"])
@@ -354,7 +370,7 @@ if app_mode == "Fund Lookup & SIP":
                 c5.metric("SIP XIRR", f"{sip_res['xirr_pct']:.2f}%")
             else:
                 c5.metric("Absolute Return", f"{sip_res['absolute_return_pct']:.2f}%")
-            st.caption(f"SIP of ₹{sip_amount:,.0f} on day {sip_day} | Latest NAV used: {sip_res['latest_nav']}")
+            st.caption(f"SIP of ₹{sip_amount:,.0f} on day {sip_day} | Started from {sip_res.get('effective_start', 'inception')} | Latest NAV: {sip_res['latest_nav']}")
 
             st.subheader("Instalment-wise Unit Allocation & Return vs Latest NAV")
             st.dataframe(sip_res["instalments"], use_container_width=True, height=400)
@@ -366,9 +382,6 @@ if app_mode == "Fund Lookup & SIP":
         with st.expander("Recent NAV data"):
             st.dataframe(hist.tail(100)[["date", "nav"]].sort_values("date", ascending=False), use_container_width=True)
 
-# ============================================================
-# MODE: Optimiser
-# ============================================================
 elif app_mode == "Find Best Funds (Optimiser)":
     if st.sidebar.button("🚀 Run Optimiser", type="primary"):
         if filtered.empty:
