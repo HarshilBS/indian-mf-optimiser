@@ -64,7 +64,8 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
     cols = ["Scheme Name", "AMC", "Category", "Weight %", "CAGR %", "Sharpe"]
     return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
-def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
+def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date):
+    """SIP with multiple frequencies. Starts from fund inception if later than start_date."""
     if hist_df.empty:
         return None
     hist = hist_df.copy()
@@ -75,21 +76,39 @@ def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
     end_ts = pd.Timestamp(end_date)
     effective_start = max(pd.Timestamp(start_date), first_available)
 
+    # Frequency offsets
+    freq_map = {
+        "Daily": pd.DateOffset(days=1),
+        "Weekly": pd.DateOffset(weeks=1),
+        "Fortnightly": pd.DateOffset(weeks=2),
+        "Monthly": pd.DateOffset(months=1),
+        "Quarterly": pd.DateOffset(months=3),
+        "Semi-annually": pd.DateOffset(months=6),
+    }
+    offset = freq_map.get(frequency, pd.DateOffset(months=1))
+
     sip_rows = []
     used_dates = set()
-    current = effective_start.replace(day=min(sip_day, 28))
-    if current < first_available:
-        current = first_available.replace(day=min(sip_day, 28))
-        if current < first_available:
-            current = current + pd.DateOffset(months=1)
+    current = effective_start
+
+    # For monthly+ frequencies, try to align to sip_day if possible
+    if frequency in ("Monthly", "Quarterly", "Semi-annually"):
+        try:
+            current = effective_start.replace(day=min(sip_day, 28))
+            if current < first_available:
+                current = current + offset
+        except Exception:
+            current = effective_start
 
     while current <= end_ts:
         candidates = hist[(hist["date"] >= current) & (~hist["date"].isin(used_dates))]
         if not candidates.empty:
             chosen = candidates.iloc[0]
-            sip_rows.append(chosen)
-            used_dates.add(chosen["date"])
-        current = current + pd.DateOffset(months=1)
+            # Avoid reusing the exact same date for high-frequency SIPs
+            if chosen["date"] not in used_dates:
+                sip_rows.append(chosen)
+                used_dates.add(chosen["date"])
+        current = current + offset
 
     if len(sip_rows) < 1:
         return None
@@ -108,22 +127,22 @@ def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
         nav = float(row["nav"])
         if nav <= 0:
             continue
-        units_bought = monthly_amount / nav
+        units_bought = amount / nav
         total_units += units_bought
-        total_invested += monthly_amount
+        total_invested += amount
         current_value = units_bought * latest_nav
-        abs_return = (current_value / monthly_amount - 1) * 100
+        abs_return = (current_value / amount - 1) * 100
         instalments.append({
             "Date": row["date"].strftime("%d-%b-%Y"),
             "NAV": round(nav, 4),
-            "Amount": monthly_amount,
+            "Amount": amount,
             "Units Bought": round(units_bought, 4),
             "Cumulative Units": round(total_units, 4),
             "Current Value": round(current_value, 2),
             "Return vs Latest %": round(abs_return, 2),
         })
         dates_for_xirr.append(row["date"])
-        amounts_for_xirr.append(-monthly_amount)
+        amounts_for_xirr.append(-amount)
 
     if total_units <= 0:
         return None
@@ -146,7 +165,7 @@ def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
     abs_total = round((final_value / total_invested - 1) * 100, 2) if total_invested else 0
 
     return {
-        "months": len(instalments),
+        "instalments_count": len(instalments),
         "invested": total_invested,
         "final_value": round(final_value, 2),
         "total_units": round(total_units, 4),
@@ -155,6 +174,7 @@ def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
         "absolute_return_pct": abs_total,
         "instalments": pd.DataFrame(instalments),
         "effective_start": effective_start.strftime("%d-%b-%Y"),
+        "frequency": frequency,
     }
 
 st.set_page_config(
@@ -235,10 +255,19 @@ end_date = st.sidebar.date_input("End date", datetime.now())
 
 investment_type = st.sidebar.radio("Investment type", ["Lumpsum", "SIP"])
 sip_amount = 10000
+sip_frequency = "Monthly"
 sip_day = 5
 if investment_type == "SIP" or app_mode == "Fund Lookup & SIP":
-    sip_amount = st.sidebar.number_input("Monthly SIP amount (₹)", 500, 100000, 10000, step=500)
-    sip_day = st.sidebar.slider("SIP day of month", 1, 28, 5)
+    sip_frequency = st.sidebar.selectbox(
+        "SIP frequency",
+        ["Daily", "Weekly", "Fortnightly", "Monthly", "Quarterly", "Semi-annually"],
+        index=3,
+    )
+    sip_amount = st.sidebar.number_input(f"{sip_frequency} SIP amount (₹)", 100, 100000, 10000, step=100)
+    if sip_frequency in ("Monthly", "Quarterly", "Semi-annually"):
+        sip_day = st.sidebar.slider("SIP day of month", 1, 28, 5)
+    else:
+        sip_day = 1
 
 st.sidebar.subheader("Scheme types")
 selected_categories = []
@@ -277,7 +306,6 @@ if st.sidebar.button("🗑️ Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
-# Apply sidebar filters
 filtered = df_schemes.copy()
 if selected_categories:
     filtered = filtered[filtered["Cateogory"].isin(selected_categories)]
@@ -296,14 +324,12 @@ if app_mode == "Fund Lookup & SIP":
     st.subheader("🔍 Fund Lookup — Full NAV History & SIP Return")
 
     search = st.text_input("Search scheme name or AMC", "")
-    # Use filtered (respects sidebar) and drop duplicates by Scheme Name
     schemes_view = filtered.copy()
     if search:
         mask = schemes_view["Scheme Name"].str.contains(search, case=False, na=False) | \
                schemes_view["AMC"].astype(str).str.contains(search, case=False, na=False)
         schemes_view = schemes_view[mask]
 
-    # Keep one row per unique scheme name (after filters)
     schemes_view = schemes_view.drop_duplicates(subset=["Scheme Name"]).sort_values("Scheme Name").reset_index(drop=True)
 
     if schemes_view.empty:
@@ -355,14 +381,17 @@ if app_mode == "Fund Lookup & SIP":
         csv = hist.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download full NAV history", csv, f"nav_{selected_code}.csv", "text/csv")
 
-        st.subheader("💰 SIP Return + Unit Allocation")
+        st.subheader(f"💰 {sip_frequency} SIP Return + Unit Allocation")
         period_hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))]
         if period_hist.empty:
             period_hist = hist[hist["date"] <= pd.Timestamp(end_date)]
-        sip_res = compute_sip_return(period_hist if not period_hist.empty else hist, sip_amount, sip_day, start_date, end_date)
+        sip_res = compute_sip_return(
+            period_hist if not period_hist.empty else hist,
+            sip_amount, sip_frequency, sip_day, start_date, end_date
+        )
         if sip_res:
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Months", sip_res["months"])
+            c1.metric("Instalments", sip_res["instalments_count"])
             c2.metric("Amount Invested", f"₹{sip_res['invested']:,.0f}")
             c3.metric("Total Units", f"{sip_res['total_units']:.4f}")
             c4.metric("Final Value", f"₹{sip_res['final_value']:,.0f}")
@@ -370,7 +399,11 @@ if app_mode == "Fund Lookup & SIP":
                 c5.metric("SIP XIRR", f"{sip_res['xirr_pct']:.2f}%")
             else:
                 c5.metric("Absolute Return", f"{sip_res['absolute_return_pct']:.2f}%")
-            st.caption(f"SIP of ₹{sip_amount:,.0f} on day {sip_day} | Started from {sip_res.get('effective_start', 'inception')} | Latest NAV: {sip_res['latest_nav']}")
+            st.caption(
+                f"{sip_frequency} SIP of ₹{sip_amount:,.0f} | "
+                f"Started from {sip_res.get('effective_start', 'inception')} | "
+                f"Latest NAV: {sip_res['latest_nav']}"
+            )
 
             st.subheader("Instalment-wise Unit Allocation & Return vs Latest NAV")
             st.dataframe(sip_res["instalments"], use_container_width=True, height=400)
