@@ -65,8 +65,6 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
     return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
 def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
-    """SIP calculation. Starts only from the fund's first available NAV (inception).
-    No phantom instalments before the fund existed. Each instalment uses a unique date."""
     if hist_df.empty:
         return None
     hist = hist_df.copy()
@@ -75,13 +73,11 @@ def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
 
     first_available = hist["date"].iloc[0]
     end_ts = pd.Timestamp(end_date)
-    # Effective start = later of user start and fund inception
     effective_start = max(pd.Timestamp(start_date), first_available)
 
     sip_rows = []
     used_dates = set()
     current = effective_start.replace(day=min(sip_day, 28))
-    # If the day-adjusted current is before first available, jump to first available month
     if current < first_available:
         current = first_available.replace(day=min(sip_day, 28))
         if current < first_available:
@@ -281,6 +277,7 @@ if st.sidebar.button("🗑️ Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
+# Apply sidebar filters
 filtered = df_schemes.copy()
 if selected_categories:
     filtered = filtered[filtered["Cateogory"].isin(selected_categories)]
@@ -299,14 +296,18 @@ if app_mode == "Fund Lookup & SIP":
     st.subheader("🔍 Fund Lookup — Full NAV History & SIP Return")
 
     search = st.text_input("Search scheme name or AMC", "")
-    schemes_view = df_schemes.copy()
+    # Use filtered (respects sidebar) and drop duplicates by Scheme Name
+    schemes_view = filtered.copy()
     if search:
         mask = schemes_view["Scheme Name"].str.contains(search, case=False, na=False) | \
                schemes_view["AMC"].astype(str).str.contains(search, case=False, na=False)
         schemes_view = schemes_view[mask]
 
+    # Keep one row per unique scheme name (after filters)
+    schemes_view = schemes_view.drop_duplicates(subset=["Scheme Name"]).sort_values("Scheme Name").reset_index(drop=True)
+
     if schemes_view.empty:
-        st.warning("No schemes match your search.")
+        st.warning("No schemes match your search / filters.")
         st.stop()
 
     options = schemes_view["Scheme Name"].tolist()
@@ -356,7 +357,6 @@ if app_mode == "Fund Lookup & SIP":
 
         st.subheader("💰 SIP Return + Unit Allocation")
         period_hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))]
-        # If period is empty because start is before inception, use full hist from inception
         if period_hist.empty:
             period_hist = hist[hist["date"] <= pd.Timestamp(end_date)]
         sip_res = compute_sip_return(period_hist if not period_hist.empty else hist, sip_amount, sip_day, start_date, end_date)
