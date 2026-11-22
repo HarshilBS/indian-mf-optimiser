@@ -207,7 +207,7 @@ if app_mode == "Find Best Funds (Optimiser)":
                 if hist is None or hist.empty:
                     continue
                 hist = hist.reset_index()
-                hist["date"] = pd.to_datetime(hist["date"], format="%d-%m-%Y", errors="coerce")
+                hist["date"] = pd.to_datetime(hist["date"], dayfirst=True, errors="coerce")
                 hist = hist.dropna(subset=["date", "nav"]).sort_values("date")
                 hist["nav"] = pd.to_numeric(hist["nav"], errors="coerce")
                 hist = hist.dropna(subset=["nav"])
@@ -357,29 +357,48 @@ if app_mode == "Find Best Funds (Optimiser)":
             st.info("Top funds by selected metric:")
             st.dataframe(res_df.head(max_funds))
 
-        # Chart top 5
+        # Chart top 5 – Growth of ₹100 (robust)
         st.subheader("📈 Cumulative Growth of Top 5")
         fig = go.Figure()
+        traces_added = 0
         for _, r in res_df.head(5).iterrows():
             try:
                 hist = mf.get_scheme_historical_nav(r["Code"], as_Dataframe=True)
-                if hist is None:
+                if hist is None or hist.empty:
                     continue
                 hist = hist.reset_index()
-                hist["date"] = pd.to_datetime(hist["date"], format="%d-%m-%Y")
-                hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))].sort_values("date")
-                if len(hist) > 5:
-                    base = hist["nav"].iloc[0]
-                    fig.add_trace(go.Scatter(
-                        x=hist["date"],
-                        y=hist["nav"] / base * 100,
-                        mode="lines",
-                        name=r["Scheme Name"][:35]
-                    ))
+                hist["date"] = pd.to_datetime(hist["date"], dayfirst=True, errors="coerce")
+                hist["nav"] = pd.to_numeric(hist["nav"], errors="coerce")
+                hist = hist.dropna(subset=["date", "nav"]).sort_values("date")
+                hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))]
+                if len(hist) < 5:
+                    continue
+                base = float(hist["nav"].iloc[0])
+                if base <= 0:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=hist["date"],
+                    y=(hist["nav"] / base * 100),
+                    mode="lines",
+                    name=str(r.get("Scheme Name", r["Code"]))[:40],
+                    hovertemplate="%{x|%d-%b-%Y}<br>₹%{y:.1f}<extra></extra>"
+                ))
+                traces_added += 1
             except Exception:
-                pass
-        fig.update_layout(title="Growth of ₹100", yaxis_title="Value", height=450)
-        st.plotly_chart(fig, use_container_width=True)
+                continue
+
+        if traces_added > 0:
+            fig.update_layout(
+                title="Growth of ₹100",
+                yaxis_title="Value (₹)",
+                xaxis_title="Date",
+                height=480,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Not enough NAV history to plot the growth chart for the selected period.")
 
 else:
     st.info("**Analyse My Portfolio** mode: search and add your holdings (coming in next update). Use Find Best Funds for now.")
