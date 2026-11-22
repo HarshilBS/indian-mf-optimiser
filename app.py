@@ -65,7 +65,6 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
     return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
 def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date):
-    """SIP with multiple frequencies. Starts from fund inception if later than start_date."""
     if hist_df.empty:
         return None
     hist = hist_df.copy()
@@ -76,7 +75,6 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
     end_ts = pd.Timestamp(end_date)
     effective_start = max(pd.Timestamp(start_date), first_available)
 
-    # Frequency offsets
     freq_map = {
         "Daily": pd.DateOffset(days=1),
         "Weekly": pd.DateOffset(weeks=1),
@@ -91,7 +89,6 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
     used_dates = set()
     current = effective_start
 
-    # For monthly+ frequencies, try to align to sip_day if possible
     if frequency in ("Monthly", "Quarterly", "Semi-annually"):
         try:
             current = effective_start.replace(day=min(sip_day, 28))
@@ -104,7 +101,6 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
         candidates = hist[(hist["date"] >= current) & (~hist["date"].isin(used_dates))]
         if not candidates.empty:
             chosen = candidates.iloc[0]
-            # Avoid reusing the exact same date for high-frequency SIPs
             if chosen["date"] not in used_dates:
                 sip_rows.append(chosen)
                 used_dates.add(chosen["date"])
@@ -122,6 +118,9 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
     total_invested = 0.0
     dates_for_xirr = []
     amounts_for_xirr = []
+    sip_dates = []
+    cum_invested_list = []
+    units_after_list = []
 
     for row in sip_rows:
         nav = float(row["nav"])
@@ -143,6 +142,9 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
         })
         dates_for_xirr.append(row["date"])
         amounts_for_xirr.append(-amount)
+        sip_dates.append(row["date"])
+        cum_invested_list.append(total_invested)
+        units_after_list.append(total_units)
 
     if total_units <= 0:
         return None
@@ -164,6 +166,25 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
 
     abs_total = round((final_value / total_invested - 1) * 100, 2) if total_invested else 0
 
+    # Build portfolio value series for chart
+    chart_dates = []
+    chart_value = []
+    chart_invested = []
+    units_so_far = 0.0
+    invested_so_far = 0.0
+    sip_idx = 0
+    for _, hrow in hist.iterrows():
+        d = hrow["date"]
+        if d > end_ts:
+            break
+        while sip_idx < len(sip_dates) and sip_dates[sip_idx] <= d:
+            units_so_far = units_after_list[sip_idx]
+            invested_so_far = cum_invested_list[sip_idx]
+            sip_idx += 1
+        chart_dates.append(d)
+        chart_value.append(units_so_far * float(hrow["nav"]))
+        chart_invested.append(invested_so_far)
+
     return {
         "instalments_count": len(instalments),
         "invested": total_invested,
@@ -175,6 +196,11 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
         "instalments": pd.DataFrame(instalments),
         "effective_start": effective_start.strftime("%d-%b-%Y"),
         "frequency": frequency,
+        "chart_dates": chart_dates,
+        "chart_value": chart_value,
+        "chart_invested": chart_invested,
+        "sip_dates": sip_dates,
+        "sip_invested_at": cum_invested_list,
     }
 
 st.set_page_config(
@@ -404,6 +430,44 @@ if app_mode == "Fund Lookup & SIP":
                 f"Started from {sip_res.get('effective_start', 'inception')} | "
                 f"Latest NAV: {sip_res['latest_nav']}"
             )
+
+            # Intuitive SIP chart
+            st.subheader("SIP Growth vs Money Invested")
+            sip_fig = go.Figure()
+            sip_fig.add_trace(go.Scatter(
+                x=sip_res["chart_dates"],
+                y=sip_res["chart_invested"],
+                mode="lines",
+                name="Money Invested",
+                line=dict(shape="hv", color="#888", width=2),
+                hovertemplate="%{x|%d-%b-%Y}<br>Invested: ₹%{y:,.0f}<extra></extra>"
+            ))
+            sip_fig.add_trace(go.Scatter(
+                x=sip_res["chart_dates"],
+                y=sip_res["chart_value"],
+                mode="lines",
+                name="Portfolio Value",
+                line=dict(color="#1f77b4", width=2.5),
+                hovertemplate="%{x|%d-%b-%Y}<br>Value: ₹%{y:,.0f}<extra></extra>"
+            ))
+            # Markers for each SIP instalment
+            sip_fig.add_trace(go.Scatter(
+                x=sip_res["sip_dates"],
+                y=sip_res["sip_invested_at"],
+                mode="markers",
+                name="SIP Instalment",
+                marker=dict(size=8, color="#ff7f0e", symbol="circle"),
+                hovertemplate="SIP on %{x|%d-%b-%Y}<br>Cumulative invested: ₹%{y:,.0f}<extra></extra>"
+            ))
+            sip_fig.update_layout(
+                title=f"{sip_frequency} SIP — Invested vs Value",
+                xaxis_title="Date",
+                yaxis_title="Amount (₹)",
+                height=480,
+                hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(sip_fig, use_container_width=True)
 
             st.subheader("Instalment-wise Unit Allocation & Return vs Latest NAV")
             st.dataframe(sip_res["instalments"], use_container_width=True, height=400)
