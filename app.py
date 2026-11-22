@@ -15,7 +15,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight=0.40, selection="best"):
-    """Select funds according to selection mode while respecting constraints."""
     if res_df.empty:
         return pd.DataFrame()
     df = res_df.copy()
@@ -65,6 +64,65 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
     cols = ["Scheme Name", "AMC", "Category", "Weight %", "CAGR %", "Sharpe"]
     return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
+def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
+    """Approximate SIP XIRR using monthly investments on sip_day."""
+    if hist_df.empty:
+        return None
+    hist = hist_df.copy()
+    hist["date"] = pd.to_datetime(hist["date"])
+    hist = hist.sort_values("date")
+    # Generate SIP dates
+    sip_dates = []
+    current = pd.Timestamp(start_date).replace(day=min(sip_day, 28))
+    end_ts = pd.Timestamp(end_date)
+    while current <= end_ts:
+        # find nearest available NAV date on or after SIP date
+        candidates = hist[hist["date"] >= current]
+        if not candidates.empty:
+            sip_dates.append(candidates.iloc[0])
+        current = current + pd.DateOffset(months=1)
+    if len(sip_dates) < 2:
+        return None
+    # Cash flows: negative for investments, positive for final value
+    dates = []
+    amounts = []
+    units = 0.0
+    for row in sip_dates:
+        nav = float(row["nav"])
+        if nav <= 0:
+            continue
+        units += monthly_amount / nav
+        dates.append(row["date"])
+        amounts.append(-monthly_amount)
+    if units <= 0:
+        return None
+    final_nav = float(hist[hist["date"] <= end_ts]["nav"].iloc[-1])
+    final_value = units * final_nav
+    dates.append(end_ts)
+    amounts.append(final_value)
+    # Simple XIRR via numpy IRR on irregular periods is approximate; use scipy if available
+    try:
+        from scipy.optimize import newton
+        def npv(r):
+            t0 = dates[0]
+            return sum(amt / (1 + r) ** ((d - t0).days / 365.25) for amt, d in zip(amounts, dates))
+        xirr = newton(npv, 0.1)
+        return {
+            "months": len(sip_dates),
+            "invested": len(sip_dates) * monthly_amount,
+            "final_value": round(final_value, 2),
+            "xirr_pct": round(xirr * 100, 2),
+            "absolute_return_pct": round((final_value / (len(sip_dates) * monthly_amount) - 1) * 100, 2),
+        }
+    except Exception:
+        return {
+            "months": len(sip_dates),
+            "invested": len(sip_dates) * monthly_amount,
+            "final_value": round(final_value, 2),
+            "xirr_pct": None,
+            "absolute_return_pct": round((final_value / (len(sip_dates) * monthly_amount) - 1) * 100, 2),
+        }
+
 st.set_page_config(
     page_title="Indian Mutual Fund Optimiser",
     page_icon="📈",
@@ -79,7 +137,6 @@ Uses your classification data + live NAV from AMFI (via mftool / mfapi.in).
 *Past performance is not indicative of future returns. Not investment advice.*
 """)
 
-# ---------- Data Loading ----------
 @st.cache_data
 def load_schemes():
     try:
@@ -107,7 +164,6 @@ mf = get_mftool()
 if df_schemes.empty:
     st.stop()
 
-# Category groups for nicer UI
 CATEGORY_GROUPS = {
     "Equity": [
         "Large Cap Fund", "Mid Cap Fund", "Small Cap Fund", "Large & Mid Cap Fund",
@@ -132,12 +188,11 @@ CATEGORY_GROUPS = {
     ]
 }
 
-# ---------- Sidebar ----------
 st.sidebar.header("Parameters")
 
 app_mode = st.sidebar.radio(
     "Mode",
-    ["Find Best Funds (Optimiser)", "Analyse My Portfolio"],
+    ["Find Best Funds (Optimiser)", "Fund Lookup & SIP", "Analyse My Portfolio"],
     horizontal=False,
 )
 
@@ -147,11 +202,11 @@ end_date = st.sidebar.date_input("End date", datetime.now())
 investment_type = st.sidebar.radio("Investment type", ["Lumpsum", "SIP"])
 sip_amount = 10000
 sip_day = 5
-if investment_type == "SIP":
+if investment_type == "SIP" or app_mode == "Fund Lookup & SIP":
     sip_amount = st.sidebar.number_input("Monthly SIP amount (₹)", 500, 100000, 10000, step=500)
     sip_day = st.sidebar.slider("SIP day of month", 1, 28, 5)
 
-# Category selection
+# Category selection (used by optimiser)
 st.sidebar.subheader("Scheme types")
 selected_categories = []
 for group, cats in CATEGORY_GROUPS.items():
@@ -182,7 +237,6 @@ portfolio_selections = st.sidebar.multiselect(
     "Portfolios to compare (side by side)",
     ["Best", "Median", "Average", "Worst"],
     default=["Best", "Median"],
-    help="Select one or more. They will be shown next to each other."
 )
 use_ilp = st.sidebar.checkbox("Use PuLP optimiser for Best portfolio", value=True)
 
@@ -190,7 +244,7 @@ if st.sidebar.button("🗑️ Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
-# ---------- Filtering ----------
+# ---------- Filtering (for optimiser) ----------
 filtered = df_schemes.copy()
 if selected_categories:
     filtered = filtered[filtered["Cateogory"].isin(selected_categories)]
@@ -205,8 +259,97 @@ elif option_filter == "IDCW only":
 
 st.sidebar.info(f"Matching schemes: {len(filtered)}")
 
-# ---------- Main ----------
-if app_mode == "Find Best Funds (Optimiser)":
+# ============================================================
+# MODE: Fund Lookup & SIP
+# ============================================================
+if app_mode == "Fund Lookup & SIP":
+    st.subheader("🔍 Fund Lookup — Full NAV History & SIP Return")
+
+    # Searchable scheme selector
+    search = st.text_input("Search scheme name or AMC", "")
+    schemes_view = df_schemes.copy()
+    if search:
+        mask = schemes_view["Scheme Name"].str.contains(search, case=False, na=False) | \
+               schemes_view["AMC"].astype(str).str.contains(search, case=False, na=False)
+        schemes_view = schemes_view[mask]
+
+    if schemes_view.empty:
+        st.warning("No schemes match your search.")
+        st.stop()
+
+    options = schemes_view["Scheme Name"].tolist()
+    codes = schemes_view["Code"].tolist()
+    selected_name = st.selectbox("Choose a scheme", options)
+    selected_code = codes[options.index(selected_name)]
+
+    if st.button("📊 Load NAV History & SIP", type="primary"):
+        with st.spinner("Fetching full NAV history..."):
+            hist = mf.get_scheme_historical_nav(selected_code, as_Dataframe=True)
+        if hist is None or hist.empty:
+            st.error("No NAV data available for this scheme.")
+            st.stop()
+
+        hist = hist.reset_index()
+        hist["date"] = pd.to_datetime(hist["date"], dayfirst=True, errors="coerce")
+        hist["nav"] = pd.to_numeric(hist["nav"], errors="coerce")
+        hist = hist.dropna(subset=["date", "nav"]).sort_values("date").reset_index(drop=True)
+
+        st.success(f"Loaded {len(hist)} NAV records for {selected_name}")
+
+        # Full history chart
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=hist["date"], y=hist["nav"],
+            mode="lines", name="NAV",
+            hovertemplate="%{x|%d-%b-%Y}<br>NAV: %{y:.4f}<extra></extra>"
+        ))
+        fig.update_layout(
+            title=f"Full NAV History — {selected_name}",
+            xaxis_title="Date", yaxis_title="NAV",
+            height=500, hovermode="x unified"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Summary stats
+        first_nav = hist["nav"].iloc[0]
+        last_nav = hist["nav"].iloc[-1]
+        years = (hist["date"].iloc[-1] - hist["date"].iloc[0]).days / 365.25
+        cagr = ((last_nav / first_nav) ** (1 / years) - 1) * 100 if years > 0.1 and first_nav > 0 else 0
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("First NAV", f"{first_nav:.4f}", hist["date"].iloc[0].strftime("%d-%b-%Y"))
+        col2.metric("Latest NAV", f"{last_nav:.4f}", hist["date"].iloc[-1].strftime("%d-%b-%Y"))
+        col3.metric("Total Years", f"{years:.1f}")
+        col4.metric("Lifetime CAGR", f"{cagr:.2f}%")
+
+        # Download full history
+        csv = hist.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download full NAV history", csv, f"nav_{selected_code}.csv", "text/csv")
+
+        # SIP return for the selected period
+        st.subheader("💰 SIP Return")
+        period_hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))]
+        sip_res = compute_sip_return(period_hist, sip_amount, sip_day, start_date, end_date)
+        if sip_res:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Months", sip_res["months"])
+            c2.metric("Amount Invested", f"₹{sip_res['invested']:,.0f}")
+            c3.metric("Final Value", f"₹{sip_res['final_value']:,.0f}")
+            if sip_res["xirr_pct"] is not None:
+                c4.metric("SIP XIRR", f"{sip_res['xirr_pct']:.2f}%")
+            else:
+                c4.metric("Absolute Return", f"{sip_res['absolute_return_pct']:.2f}%")
+            st.caption(f"SIP of ₹{sip_amount:,.0f} on day {sip_day} of each month between {start_date} and {end_date}.")
+        else:
+            st.info("Not enough data in the selected date range to compute SIP return.")
+
+        # Show recent NAV table
+        with st.expander("Recent NAV data"):
+            st.dataframe(hist.tail(100)[["date", "nav"]].sort_values("date", ascending=False), use_container_width=True)
+
+# ============================================================
+# MODE: Optimiser (existing)
+# ============================================================
+elif app_mode == "Find Best Funds (Optimiser)":
     if st.sidebar.button("🚀 Run Optimiser", type="primary"):
         if filtered.empty:
             st.error("No schemes match the selected filters.")
@@ -305,7 +448,6 @@ if app_mode == "Find Best Funds (Optimiser)":
         csv = res_df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download ranked results", csv, "mf_ranked.csv", "text/csv")
 
-        # Side-by-side portfolios
         if not portfolio_selections:
             st.warning("Select at least one portfolio type in the sidebar.")
         else:
@@ -380,7 +522,6 @@ if app_mode == "Find Best Funds (Optimiser)":
                     else:
                         st.info("No allocation")
 
-        # Chart top 5
         st.subheader("📈 Cumulative Growth of Top 5")
         fig = go.Figure()
         traces_added = 0
@@ -424,7 +565,7 @@ if app_mode == "Find Best Funds (Optimiser)":
             st.info("Not enough NAV history to plot the growth chart for the selected period.")
 
 else:
-    st.info("**Analyse My Portfolio** mode: search and add your holdings (coming in next update). Use Find Best Funds for now.")
+    st.info("**Analyse My Portfolio** mode: search and add your holdings (coming in next update). Use Find Best Funds or Fund Lookup for now.")
     st.markdown("""
     **Tips**
     - Prefer **Direct + Growth** for lower costs.
