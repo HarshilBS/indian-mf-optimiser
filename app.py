@@ -14,13 +14,26 @@ import plotly.graph_objects as go
 import warnings
 warnings.filterwarnings('ignore')
 
-def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight=0.40):
-    """Select top funds while respecting per-fund and per-AMC caps."""
+def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight=0.40, selection="best"):
+    """Select funds according to selection mode while respecting constraints."""
     if res_df.empty:
         return pd.DataFrame()
+    df = res_df.copy()
+    if selection == "worst":
+        df = df.iloc[::-1].reset_index(drop=True)
+    elif selection == "median":
+        mid = len(df) // 2
+        start = max(0, mid - max_funds // 2)
+        df = df.iloc[start:start + max_funds * 2].reset_index(drop=True)
+    elif selection == "average":
+        # take a spread across the ranking
+        step = max(1, len(df) // (max_funds * 2))
+        df = df.iloc[::step].reset_index(drop=True)
+    # else best: keep sorted order
+
     selected = []
     amc_used = {}
-    for _, row in res_df.iterrows():
+    for _, row in df.iterrows():
         if len(selected) >= max_funds:
             break
         amc = str(row.get("AMC", "Unknown")).strip() or "Unknown"
@@ -167,6 +180,11 @@ min_weight = st.sidebar.slider("Min exposure per fund (%)", 0, 50, 5) / 100
 max_amc_weight = st.sidebar.slider("Max allocation per AMC (%)", 10, 100, 40) / 100
 
 metric = st.sidebar.selectbox("Rank / Optimise by", ["CAGR", "Sharpe Ratio", "Total Return", "Sortino Ratio"])
+portfolio_selection = st.sidebar.selectbox(
+    "Portfolio selection",
+    ["Best", "Median", "Average", "Worst"],
+    help="Best = top ranked, Worst = bottom ranked, Median = middle of ranking, Average = spread across ranking"
+)
 use_ilp = st.sidebar.checkbox("Use PuLP optimiser (with AMC constraint)", value=True)
 
 if st.sidebar.button("🗑️ Clear cache"):
@@ -290,11 +308,15 @@ if app_mode == "Find Best Funds (Optimiser)":
         csv = res_df.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download ranked results", csv, "mf_ranked.csv", "text/csv")
 
+        # Portfolio selection label
+        sel_map = {"Best": "best", "Median": "median", "Average": "average", "Worst": "worst"}
+        sel_key = sel_map.get(portfolio_selection, "best")
+
         # Recommended allocation – try PuLP first (with AMC cap), fall back to greedy
-        st.subheader("🎯 Recommended Allocation")
+        st.subheader(f"🎯 {portfolio_selection} Portfolio Allocation")
         alloc_df = None
 
-        if use_ilp and PULP_AVAILABLE:
+        if use_ilp and PULP_AVAILABLE and sel_key == "best":
             try:
                 prob = pulp.LpProblem("mf_opt", pulp.LpMaximize)
                 codes = list(res_df["Code"])
@@ -312,13 +334,11 @@ if app_mode == "Find Best Funds (Optimiser)":
                     prob += w[c] <= max_weight * sel[c]
                     prob += w[c] >= min_weight * sel[c]
 
-                # AMC-level constraint
                 for amc in set(str(a) for a in amc_map.values()):
                     codes_in = [c for c in codes if str(amc_map.get(c, "")) == amc]
                     if codes_in:
                         prob += pulp.lpSum(w[c] for c in codes_in) <= max_amc_weight
 
-                # Solve
                 try:
                     status_code = prob.solve(pulp.PULP_CBC_CMD(msg=False))
                 except Exception:
@@ -340,18 +360,18 @@ if app_mode == "Find Best Funds (Optimiser)":
                             })
                     if rows:
                         alloc_df = pd.DataFrame(rows).sort_values("Weight %", ascending=False)
-                        st.success(f"PuLP ILP solution (respects max {int(max_amc_weight*100)}% per AMC)")
+                        st.success(f"PuLP ILP solution for {portfolio_selection} (max {int(max_amc_weight*100)}% per AMC)")
             except Exception as e:
-                st.warning(f"PuLP failed ({type(e).__name__}: {str(e)[:150]}). Falling back to greedy allocation.")
+                st.warning(f"PuLP failed ({type(e).__name__}: {str(e)[:150]}). Falling back to greedy.")
 
         if alloc_df is None or alloc_df.empty:
-            alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight)
+            alloc_df = greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc_weight, selection=sel_key)
             if not alloc_df.empty:
-                st.info(f"Using greedy allocation (per-fund + max {int(max_amc_weight*100)}% per AMC)")
+                st.info(f"{portfolio_selection} portfolio (per-fund + max {int(max_amc_weight*100)}% per AMC)")
 
         if alloc_df is not None and not alloc_df.empty:
             st.dataframe(alloc_df, use_container_width=True)
-            fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title="Recommended Allocation")
+            fig = px.pie(alloc_df, values="Weight %", names="Scheme Name", title=f"{portfolio_selection} Allocation")
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Top funds by selected metric:")
