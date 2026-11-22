@@ -65,63 +65,85 @@ def greedy_allocate(res_df, sort_col, max_funds, max_weight, min_weight, max_amc
     return top[[c for c in cols if c in top.columns]].sort_values("Weight %", ascending=False)
 
 def compute_sip_return(hist_df, monthly_amount, sip_day, start_date, end_date):
-    """Approximate SIP XIRR using monthly investments on sip_day."""
+    """SIP calculation with unit allocation and instalment-wise returns vs latest NAV."""
     if hist_df.empty:
         return None
     hist = hist_df.copy()
     hist["date"] = pd.to_datetime(hist["date"])
-    hist = hist.sort_values("date")
-    # Generate SIP dates
-    sip_dates = []
+    hist = hist.sort_values("date").reset_index(drop=True)
+
+    sip_rows = []
     current = pd.Timestamp(start_date).replace(day=min(sip_day, 28))
     end_ts = pd.Timestamp(end_date)
     while current <= end_ts:
-        # find nearest available NAV date on or after SIP date
         candidates = hist[hist["date"] >= current]
         if not candidates.empty:
-            sip_dates.append(candidates.iloc[0])
+            sip_rows.append(candidates.iloc[0])
         current = current + pd.DateOffset(months=1)
-    if len(sip_dates) < 2:
+    if len(sip_rows) < 1:
         return None
-    # Cash flows: negative for investments, positive for final value
-    dates = []
-    amounts = []
-    units = 0.0
-    for row in sip_dates:
+
+    latest_nav = float(hist[hist["date"] <= end_ts]["nav"].iloc[-1])
+    if latest_nav <= 0:
+        return None
+
+    instalments = []
+    total_units = 0.0
+    total_invested = 0.0
+    dates_for_xirr = []
+    amounts_for_xirr = []
+
+    for row in sip_rows:
         nav = float(row["nav"])
         if nav <= 0:
             continue
-        units += monthly_amount / nav
-        dates.append(row["date"])
-        amounts.append(-monthly_amount)
-    if units <= 0:
+        units_bought = monthly_amount / nav
+        total_units += units_bought
+        total_invested += monthly_amount
+        current_value = units_bought * latest_nav
+        abs_return = (current_value / monthly_amount - 1) * 100
+        instalments.append({
+            "Date": row["date"].strftime("%d-%b-%Y"),
+            "NAV": round(nav, 4),
+            "Amount": monthly_amount,
+            "Units Bought": round(units_bought, 4),
+            "Cumulative Units": round(total_units, 4),
+            "Current Value": round(current_value, 2),
+            "Return vs Latest %": round(abs_return, 2),
+        })
+        dates_for_xirr.append(row["date"])
+        amounts_for_xirr.append(-monthly_amount)
+
+    if total_units <= 0:
         return None
-    final_nav = float(hist[hist["date"] <= end_ts]["nav"].iloc[-1])
-    final_value = units * final_nav
-    dates.append(end_ts)
-    amounts.append(final_value)
-    # Simple XIRR via numpy IRR on irregular periods is approximate; use scipy if available
+
+    final_value = total_units * latest_nav
+    dates_for_xirr.append(end_ts)
+    amounts_for_xirr.append(final_value)
+
+    xirr_pct = None
     try:
         from scipy.optimize import newton
         def npv(r):
-            t0 = dates[0]
-            return sum(amt / (1 + r) ** ((d - t0).days / 365.25) for amt, d in zip(amounts, dates))
+            t0 = dates_for_xirr[0]
+            return sum(amt / (1 + r) ** ((d - t0).days / 365.25) for amt, d in zip(amounts_for_xirr, dates_for_xirr))
         xirr = newton(npv, 0.1)
-        return {
-            "months": len(sip_dates),
-            "invested": len(sip_dates) * monthly_amount,
-            "final_value": round(final_value, 2),
-            "xirr_pct": round(xirr * 100, 2),
-            "absolute_return_pct": round((final_value / (len(sip_dates) * monthly_amount) - 1) * 100, 2),
-        }
+        xirr_pct = round(xirr * 100, 2)
     except Exception:
-        return {
-            "months": len(sip_dates),
-            "invested": len(sip_dates) * monthly_amount,
-            "final_value": round(final_value, 2),
-            "xirr_pct": None,
-            "absolute_return_pct": round((final_value / (len(sip_dates) * monthly_amount) - 1) * 100, 2),
-        }
+        pass
+
+    abs_total = round((final_value / total_invested - 1) * 100, 2) if total_invested else 0
+
+    return {
+        "months": len(instalments),
+        "invested": total_invested,
+        "final_value": round(final_value, 2),
+        "total_units": round(total_units, 4),
+        "latest_nav": round(latest_nav, 4),
+        "xirr_pct": xirr_pct,
+        "absolute_return_pct": abs_total,
+        "instalments": pd.DataFrame(instalments),
+    }
 
 st.set_page_config(
     page_title="Indian Mutual Fund Optimiser",
@@ -206,7 +228,6 @@ if investment_type == "SIP" or app_mode == "Fund Lookup & SIP":
     sip_amount = st.sidebar.number_input("Monthly SIP amount (₹)", 500, 100000, 10000, step=500)
     sip_day = st.sidebar.slider("SIP day of month", 1, 28, 5)
 
-# Category selection (used by optimiser)
 st.sidebar.subheader("Scheme types")
 selected_categories = []
 for group, cats in CATEGORY_GROUPS.items():
@@ -244,7 +265,6 @@ if st.sidebar.button("🗑️ Clear cache"):
     st.cache_data.clear()
     st.rerun()
 
-# ---------- Filtering (for optimiser) ----------
 filtered = df_schemes.copy()
 if selected_categories:
     filtered = filtered[filtered["Cateogory"].isin(selected_categories)]
@@ -265,7 +285,6 @@ st.sidebar.info(f"Matching schemes: {len(filtered)}")
 if app_mode == "Fund Lookup & SIP":
     st.subheader("🔍 Fund Lookup — Full NAV History & SIP Return")
 
-    # Searchable scheme selector
     search = st.text_input("Search scheme name or AMC", "")
     schemes_view = df_schemes.copy()
     if search:
@@ -296,7 +315,6 @@ if app_mode == "Fund Lookup & SIP":
 
         st.success(f"Loaded {len(hist)} NAV records for {selected_name}")
 
-        # Full history chart
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=hist["date"], y=hist["nav"],
@@ -310,7 +328,6 @@ if app_mode == "Fund Lookup & SIP":
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # Summary stats
         first_nav = hist["nav"].iloc[0]
         last_nav = hist["nav"].iloc[-1]
         years = (hist["date"].iloc[-1] - hist["date"].iloc[0]).days / 365.25
@@ -321,33 +338,36 @@ if app_mode == "Fund Lookup & SIP":
         col3.metric("Total Years", f"{years:.1f}")
         col4.metric("Lifetime CAGR", f"{cagr:.2f}%")
 
-        # Download full history
         csv = hist.to_csv(index=False).encode("utf-8")
         st.download_button("📥 Download full NAV history", csv, f"nav_{selected_code}.csv", "text/csv")
 
-        # SIP return for the selected period
-        st.subheader("💰 SIP Return")
+        st.subheader("💰 SIP Return + Unit Allocation")
         period_hist = hist[(hist["date"] >= pd.Timestamp(start_date)) & (hist["date"] <= pd.Timestamp(end_date))]
         sip_res = compute_sip_return(period_hist, sip_amount, sip_day, start_date, end_date)
         if sip_res:
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Months", sip_res["months"])
             c2.metric("Amount Invested", f"₹{sip_res['invested']:,.0f}")
-            c3.metric("Final Value", f"₹{sip_res['final_value']:,.0f}")
+            c3.metric("Total Units", f"{sip_res['total_units']:.4f}")
+            c4.metric("Final Value", f"₹{sip_res['final_value']:,.0f}")
             if sip_res["xirr_pct"] is not None:
-                c4.metric("SIP XIRR", f"{sip_res['xirr_pct']:.2f}%")
+                c5.metric("SIP XIRR", f"{sip_res['xirr_pct']:.2f}%")
             else:
-                c4.metric("Absolute Return", f"{sip_res['absolute_return_pct']:.2f}%")
-            st.caption(f"SIP of ₹{sip_amount:,.0f} on day {sip_day} of each month between {start_date} and {end_date}.")
+                c5.metric("Absolute Return", f"{sip_res['absolute_return_pct']:.2f}%")
+            st.caption(f"SIP of ₹{sip_amount:,.0f} on day {sip_day} | Latest NAV used: {sip_res['latest_nav']}")
+
+            st.subheader("Instalment-wise Unit Allocation & Return vs Latest NAV")
+            st.dataframe(sip_res["instalments"], use_container_width=True, height=400)
+            inst_csv = sip_res["instalments"].to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download instalment details", inst_csv, f"sip_instalments_{selected_code}.csv", "text/csv")
         else:
             st.info("Not enough data in the selected date range to compute SIP return.")
 
-        # Show recent NAV table
         with st.expander("Recent NAV data"):
             st.dataframe(hist.tail(100)[["date", "nav"]].sort_values("date", ascending=False), use_container_width=True)
 
 # ============================================================
-# MODE: Optimiser (existing)
+# MODE: Optimiser
 # ============================================================
 elif app_mode == "Find Best Funds (Optimiser)":
     if st.sidebar.button("🚀 Run Optimiser", type="primary"):
@@ -565,13 +585,6 @@ elif app_mode == "Find Best Funds (Optimiser)":
             st.info("Not enough NAV history to plot the growth chart for the selected period.")
 
 else:
-    st.info("**Analyse My Portfolio** mode: search and add your holdings (coming in next update). Use Find Best Funds or Fund Lookup for now.")
-    st.markdown("""
-    **Tips**
-    - Prefer **Direct + Growth** for lower costs.
-    - Start with 3–5 years of history for more reliable rankings.
-    - Limit “Max schemes” if the run feels slow.
-    - Data source: AMFI via mftool.
-    """)
+    st.info("**Analyse My Portfolio** mode: coming soon. Use Find Best Funds or Fund Lookup for now.")
 
 st.caption("Classification data from user-provided SchemeData. NAVs from AMFI. Built for analysis only.")
