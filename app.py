@@ -131,14 +131,23 @@ def compute_sip_return(hist_df, amount, frequency, sip_day, start_date, end_date
         total_invested += amount
         current_value = units_bought * latest_nav
         abs_return = (current_value / amount - 1) * 100
+        holding_days = (end_ts - row["date"]).days
+        holding_years = holding_days / 365.25
+        gain = current_value - amount
+        multiple = current_value / amount if amount else 0
         instalments.append({
+            "Instalment": len(instalments) + 1,
             "Date": row["date"].strftime("%d-%b-%Y"),
             "NAV": round(nav, 4),
             "Amount": amount,
             "Units Bought": round(units_bought, 4),
             "Cumulative Units": round(total_units, 4),
+            "Holding Days": holding_days,
+            "Holding Years": round(holding_years, 2),
             "Current Value": round(current_value, 2),
+            "Gain ₹": round(gain, 2),
             "Return vs Latest %": round(abs_return, 2),
+            "Multiple": round(multiple, 2),
         })
         dates_for_xirr.append(row["date"])
         amounts_for_xirr.append(-amount)
@@ -511,9 +520,78 @@ if app_mode == "Fund Lookup & SIP":
             )
             st.plotly_chart(sip_fig, use_container_width=True)
 
-            with st.expander("View all SIP instalments (unit allocation)"):
-                st.dataframe(sip_res["instalments"], use_container_width=True, height=400)
-                inst_csv = sip_res["instalments"].to_csv(index=False).encode("utf-8")
+            # ----- Instalment-wise ladder (like Kiddo / Pecuniam) -----
+            st.subheader("📊 Instalment-wise returns")
+            inst_df = sip_res["instalments"].copy()
+
+            # First / middle / last cards
+            if len(inst_df) >= 1:
+                mid_idx = len(inst_df) // 2
+                cards = [
+                    ("First instalment (longest)", inst_df.iloc[0]),
+                    ("Middle instalment", inst_df.iloc[mid_idx]),
+                    ("Last instalment (shortest)", inst_df.iloc[-1]),
+                ]
+                cc1, cc2, cc3 = st.columns(3)
+                for col, (label, row) in zip([cc1, cc2, cc3], cards):
+                    with col:
+                        st.metric(label, f"₹{row['Current Value']:,.0f}")
+                        st.caption(
+                            f"Invested ₹{row['Amount']:,.0f} · Held {row['Holding Years']:.1f} yrs · "
+                            f"Return {row['Return vs Latest %']:+.1f}% · {row['Multiple']:.2f}×"
+                        )
+
+            # Horizontal bar chart: each instalment's final value split into principal + growth
+            if len(inst_df) <= 120:  # avoid overcrowding
+                fig_ladder = go.Figure()
+                fig_ladder.add_trace(go.Bar(
+                    y=inst_df["Instalment"].astype(str),
+                    x=inst_df["Amount"],
+                    name="Amount invested",
+                    orientation="h",
+                    marker_color="#C9C5F2",
+                ))
+                fig_ladder.add_trace(go.Bar(
+                    y=inst_df["Instalment"].astype(str),
+                    x=inst_df["Gain ₹"].clip(lower=0),
+                    name="Growth",
+                    orientation="h",
+                    marker_color="#251BB4",
+                ))
+                fig_ladder.update_layout(
+                    barmode="stack",
+                    title="Each instalment’s value at the end of the period",
+                    xaxis_title="Value (₹)",
+                    yaxis_title="Instalment # (1 = earliest)",
+                    height=max(300, min(800, len(inst_df) * 18)),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    yaxis=dict(autorange="reversed"),
+                )
+                st.plotly_chart(fig_ladder, use_container_width=True)
+                st.caption("Top bar is the first (oldest) instalment. Bottom is the most recent. Same amount in, very different time invested.")
+            else:
+                st.info(f"{len(inst_df)} instalments — chart limited to first 120 for readability. Full table below.")
+
+            with st.expander("View all SIP instalments (detailed table)", expanded=True):
+                display_df = inst_df[[
+                    "Instalment", "Date", "NAV", "Amount", "Units Bought",
+                    "Holding Years", "Current Value", "Gain ₹", "Return vs Latest %", "Multiple"
+                ]]
+                st.dataframe(
+                    display_df.style.format({
+                        "NAV": "{:.4f}",
+                        "Amount": "{:,.0f}",
+                        "Units Bought": "{:,.4f}",
+                        "Holding Years": "{:.2f}",
+                        "Current Value": "{:,.0f}",
+                        "Gain ₹": "{:,.0f}",
+                        "Return vs Latest %": "{:+.2f}%",
+                        "Multiple": "{:.2f}×",
+                    }),
+                    use_container_width=True,
+                    height=420,
+                )
+                inst_csv = inst_df.to_csv(index=False).encode("utf-8")
                 st.download_button("📥 Download SIP instalments", inst_csv, f"sip_{selected_code}.csv", "text/csv")
         else:
             st.warning("Could not compute SIP returns for the selected period. Try a longer date range.")
